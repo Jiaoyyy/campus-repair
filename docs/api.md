@@ -51,3 +51,15 @@ category 为 lighting、electrical、plumbing。位置 1 至 200 字，描述 1 
 GET /api/audit 仅管理员，支持 resource_id、page、page_size，返回本组织 items、total。每项含请求标识、动作、操作者/资源 ID、结果、最小元数据及时间，不含登录凭据。
 
 GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数据库故障时前者 200、后者 503，Qdrant/模型尚未启用不会阻断人工流程。
+
+## 视觉优化后的列表与概览
+
+`GET /api/work-orders/summary` 返回 `total`、`action`、`active`、`finished` 和 `statuses`，基于当前角色可见的全部记录；不受列表页码、位置或类别筛选影响。身份及组织/归属过滤与列表一致。
+
+`GET /api/work-orders` 新增 `queue=all|action|active|finished`：
+
+- `action`：报修人的待补充/待确认，管理员的待审核/待派单，维修人员的待接单/处理中。
+- `active`：所有非终态；`finished`：已关闭、已驳回、已取消。
+- 可与原有状态、类别、位置及分页条件叠加；无效 queue 返回 400。
+
+审计项保留原 ID 与请求标识，并附加 `actor_name` 和 `order_number`。名称/编号只关联同组织资源；非工单操作的编号为空。界面以中文动作、人员名称和工单编号展示，点击工单后仍按普通详情权限校验。

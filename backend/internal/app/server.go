@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/capabilities", s.protect(func(w http.ResponseWriter, r *http.Request) {
 		send(w, 200, map[string]any{"work_orders": true, "knowledge": false, "assistant": false, "mcp": false, "message": "智能助手与知识库将在下一阶段接入"})
 	}))
+	m.HandleFunc("GET /api/work-orders/summary", s.protect(s.summary))
 	m.HandleFunc("GET /api/work-orders", s.protect(s.list))
 	m.HandleFunc("POST /api/work-orders", s.protect(s.createHTTP))
 	m.HandleFunc("GET /api/work-orders/{id}", s.protect(s.detail))
@@ -167,6 +168,13 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
 	q, args := orderFilter(u)
 	query := r.URL.Query()
+	queue, queueArgs, queueErr := queueFilter(u.Role, query.Get("queue"))
+	if queueErr != nil {
+		s.fail(w, r, queueErr)
+		return
+	}
+	q += queue
+	args = append(args, queueArgs...)
 	if v := query.Get("status"); v != "" {
 		q += " AND status=?"
 		args = append(args, v)
@@ -323,18 +331,18 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	q := "org_id=?"
+	q := "a.org_id=?"
 	args := []any{u.OrgID}
 	if v := r.URL.Query().Get("resource_id"); v != "" {
-		q += " AND resource_id=?"
+		q += " AND a.resource_id=?"
 		args = append(args, v)
 	}
 	var count int
-	if err = s.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM audit_events WHERE "+q, args...).Scan(&count); err != nil {
+	if err = s.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM audit_events a WHERE "+q, args...).Scan(&count); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	rows, err := s.DB.QueryContext(r.Context(), "SELECT id,request_id,actor_id,action,resource_id,outcome,metadata,created_at FROM audit_events WHERE "+q+" ORDER BY id DESC LIMIT ? OFFSET ?", append(args, size, (page-1)*size)...)
+	rows, err := s.DB.QueryContext(r.Context(), "SELECT a.id,a.request_id,a.actor_id,a.action,a.resource_id,a.outcome,a.metadata,a.created_at,COALESCE(u.display_name,''),COALESCE(o.number,'') FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id AND u.org_id=a.org_id LEFT JOIN work_orders o ON o.id=a.resource_id AND o.org_id=a.org_id AND a.action LIKE 'work_order.%' WHERE "+q+" ORDER BY a.id DESC LIMIT ? OFFSET ?", append(args, size, (page-1)*size)...)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -344,14 +352,14 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id int64
 		var actor, resource *int64
-		var req, action, outcome string
+		var req, action, outcome, actorName, orderNumber string
 		var meta json.RawMessage
 		var at time.Time
-		if err = rows.Scan(&id, &req, &actor, &action, &resource, &outcome, &meta, &at); err != nil {
+		if err = rows.Scan(&id, &req, &actor, &action, &resource, &outcome, &meta, &at, &actorName, &orderNumber); err != nil {
 			s.fail(w, r, err)
 			return
 		}
-		items = append(items, map[string]any{"id": id, "request_id": req, "actor_id": actor, "action": action, "resource_id": resource, "outcome": outcome, "metadata": meta, "created_at": at})
+		items = append(items, map[string]any{"id": id, "request_id": req, "actor_id": actor, "action": action, "resource_id": resource, "outcome": outcome, "metadata": meta, "created_at": at, "actor_name": actorName, "order_number": orderNumber})
 	}
 	if err = rows.Err(); err != nil {
 		s.fail(w, r, err)
