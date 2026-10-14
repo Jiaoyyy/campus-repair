@@ -1,0 +1,38 @@
+schema: spec-driven
+
+context: |
+  Language: zh-CN
+  All artifacts must be written in zh-CN.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+  独立学期项目：校园报修与智能派单平台，成员焦阳、高慧莹。
+  教师已认可选题。首版一个校区，照明、电器、给排水三类故障。
+  三种角色：报修人、维修人员、后勤管理员；按组织、角色和工单归属授权。
+  主流程：提交、审核、派单、接单、处理、报修人确认。
+  必须覆盖大语言模型、智能体、知识库与RAG、技能、真实MCP协议。
+  AI仅辅助；派单、状态变更和结单由有权限的人确认。
+  React/TypeScript、Go、MySQL、Qdrant、Nginx、Docker Compose；Bearer登录。
+  密钥仅在服务端，模拟数据与知识库须标明演示用途，最终公网部署。
+  不做付款、库存采购、SSO、多校区运营、原生App、AI自动派单。
+  当前为全新项目，规划不能写成已实现事实，不从CampusClaw复制环境或数据。
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
