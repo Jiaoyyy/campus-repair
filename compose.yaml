@@ -1,0 +1,57 @@
+name: campus-repair
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-campus_repair}
+      MYSQL_USER: ${DB_USER:-campus_repair}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--ngram_token_size=2"]
+    volumes: ["db-data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    volumes: ["vector-data:/qdrant/storage"]
+    restart: unless-stopped
+  api:
+    build: ./backend
+    environment:
+      DB_HOST: db:3306
+      DB_NAME: ${DB_NAME:-campus_repair}
+      DB_USER: ${DB_USER:-campus_repair}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
+      SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD:?set SEED_REQUESTER_PASSWORD}
+      SEED_REQUESTER2_PASSWORD: ${SEED_REQUESTER2_PASSWORD:?set SEED_REQUESTER2_PASSWORD}
+      SEED_TECH_PASSWORD: ${SEED_TECH_PASSWORD:?set SEED_TECH_PASSWORD}
+      SEED_TECH2_PASSWORD: ${SEED_TECH2_PASSWORD:?set SEED_TECH2_PASSWORD}
+      SEED_OTHER_PASSWORD: ${SEED_OTHER_PASSWORD:?set SEED_OTHER_PASSWORD}
+    volumes: ["uploads:/data/uploads"]
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    ports: ["127.0.0.1:${WEB_PORT:-18083}:80"]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  db-data:
+  vector-data:
+  uploads:

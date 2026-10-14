@@ -14,3 +14,10 @@ data/
 *.tar.gz
 *.key
 *.pem
+
+*.tsbuildinfo
+
+__pycache__/
+*.pyc
+
+!backend/internal/app/schema.sql
