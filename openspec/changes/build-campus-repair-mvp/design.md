@@ -2,7 +2,7 @@
 
 ## Context
 
-此仓库从零初始化，目前只有文档与 OpenSpec 工具，未观察到业务代码、数据库或运行服务。选题获教师认可，动机见 proposal.md。七份 specs 定义目标行为；所有下列接口、表与模块为拟新增设计。
+此仓库从零初始化；制定本设计时只有文档与 OpenSpec 工具，没有业务代码、数据库或运行服务。当前人工工单阶段的实现与验证状态见 README 和 docs/verification.md。选题获教师认可，动机见 proposal.md。七份 specs 定义目标行为；所有下列接口、表与模块为拟新增设计。
 
 ## Goals / Non-Goals
 

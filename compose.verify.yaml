@@ -1,0 +1,5 @@
+services:
+  api:
+    image: campus-repair-api:latest
+  web:
+    image: campus-repair-web:latest
