@@ -27,6 +27,10 @@ services:
   api:
     build: ./backend
     environment: &backend-env
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-115}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}

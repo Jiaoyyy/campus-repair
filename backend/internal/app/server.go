@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -79,6 +80,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/login", s.login)
 	m.HandleFunc("POST /api/logout", s.protect(s.logout))
 	m.HandleFunc("GET /api/me", s.protect(func(w http.ResponseWriter, r *http.Request) { send(w, 200, map[string]any{"user": current(r)}) }))
+	m.HandleFunc("GET /api/agents", s.protect(s.agents))
+	m.HandleFunc("PUT /api/agents/{id}", s.protect(s.updateAgent))
+	m.HandleFunc("GET /api/conversations", s.protect(s.conversations))
+	m.HandleFunc("POST /api/conversations", s.protect(s.createConversation))
+	m.HandleFunc("GET /api/conversations/{id}/messages", s.protect(s.messages))
+	m.HandleFunc("POST /api/conversations/{id}/messages", s.protect(s.messageStream))
+	m.HandleFunc("GET /api/conversations/{id}/citations/{message}/{chunk}", s.protect(s.citationSource))
 	m.HandleFunc("GET /api/capabilities", s.protect(s.capabilities))
 	m.HandleFunc("GET /api/retrieval", s.protect(s.retrieval))
 	m.HandleFunc("GET /api/materials", s.protect(s.materials))
@@ -99,7 +107,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("X-Request-ID", id)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), requestKey{}, id), 10*time.Second)
+		timeout := 10 * time.Second
+		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/conversations/") && strings.HasSuffix(r.URL.Path, "/messages") {
+			timeout = 125 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), requestKey{}, id), timeout)
 		defer cancel()
 		m.ServeHTTP(w, r.WithContext(ctx))
 	})

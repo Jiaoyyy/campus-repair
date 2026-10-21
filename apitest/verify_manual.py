@@ -102,7 +102,7 @@ c=create(req);c=act(admin,c,'review',decision='reject',reason='无效报修');as
 expect(403,request('GET','/api/technicians?category=lighting',token=req),'staff privacy')
 v=expect(200,request('GET','/api/technicians?category=lighting',token=admin),'staff query');assert len(v['items'])==2
 expect(403,request('GET','/api/audit',token=req),'audit privacy');v=expect(200,request('GET',f"/api/audit?resource_id={o['id']}",token=admin),'audit');assert any(x['action']=='work_order.confirm' for x in v['items'])
-cap=expect(200,request('GET','/api/capabilities',token=req),'capabilities');assert cap['assistant'] is False
+cap=expect(200,request('GET','/api/capabilities',token=req),'capabilities');assert isinstance(cap['assistant'],bool) and cap['mcp'] is False
 if args.project:
  c=create(req);before=detail(req,c)
  sql("CREATE TRIGGER audit_reject BEFORE INSERT ON audit_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='isolated test failure';")

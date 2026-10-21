@@ -26,7 +26,7 @@ func Initialize(db *sql.DB, c Config) error {
 			}
 		}
 	}
-	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6))"); err != nil {
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6))"); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -55,6 +55,17 @@ func Initialize(db *sql.DB, c Config) error {
 	for _, name := range []string{"tech", "tech2"} {
 		for _, cat := range []string{"lighting", "electrical", "plumbing"} {
 			if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO technician_categories(user_id,category) SELECT id,? FROM users WHERE username=?", cat, name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, org := range []int64{1, 2} {
+		for _, seed := range []struct{ Role, Name, Prompt string }{
+			{"requester", "报修助手", "帮助报修人补全位置和故障现象，解释报修流程。"},
+			{"technician", "维修资料助手", "帮助维修人员查阅授权资料中的安全提醒。"},
+			{"admin", "后勤资料助手", "帮助管理员核对本组织报修要求，不自行派单或承诺时限。"},
+		} {
+			if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO agents(org_id,seed_key,name,role,prompt) VALUES(?,?,?,?,?)", org, seed.Role, seed.Name, seed.Role, seed.Prompt); err != nil {
 				return err
 			}
 		}

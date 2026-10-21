@@ -6,6 +6,8 @@ import { primaryAction, statusCopy, progressSteps, progressIndex, queueNames, au
 import type { Queue, Summary } from './presentation';
 import './style.css';
 import { Knowledge } from './Knowledge';
+import { Assistant } from './Assistant';
+import { AgentSettings } from './AgentSettings';
 
 function Icon({ kind = 'box' }: { kind?: string }) {
   return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -161,12 +163,14 @@ function App() {
   if (!u) return <Login message={message} onLogin={user => { setU(user); setMessage(''); }} />;
   function navigate(v: string) { setView(v); setSelected(null); setNotice(''); }
   function open(id: number) { setSelected(id); setView('detail'); setNotice(''); window.scrollTo(0, 0); }
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-icon"><Icon kind="tool" /></span>校园报修</div><p className="sidebar-label">业务工作台</p><nav><button className={view === 'list' || view === 'detail' ? 'active' : ''} onClick={() => navigate('list')}><Icon />{u.role === 'technician' ? '我的任务' : u.role === 'admin' ? '报修管理' : '我的报修'}</button>{u.role === 'requester' && <button className={view === 'create' ? 'active' : ''} onClick={() => navigate('create')}><Icon kind="plus" />新建报修</button>}{u.role === 'admin' && <button className={view === 'knowledge' ? 'active' : ''} onClick={() => navigate('knowledge')}><Icon />知识库</button>}{u.role === 'admin' && <button className={view === 'audit' ? 'active' : ''} onClick={() => navigate('audit')}><Icon />操作审计</button>}</nav><div className="sidebar-bottom"><span className="small">当前角色</span><strong>{roleNames[u.role]}</strong></div></aside>
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><span className="brand-icon"><Icon kind="tool" /></span>校园报修</div><p className="sidebar-label">业务工作台</p><nav><button className={view === 'list' || view === 'detail' ? 'active' : ''} onClick={() => navigate('list')}><Icon />{u.role === 'technician' ? '我的任务' : u.role === 'admin' ? '报修管理' : '我的报修'}</button>{u.role === 'requester' && <button className={view === 'create' ? 'active' : ''} onClick={() => navigate('create')}><Icon kind="plus" />新建报修</button>}<button className={view === 'assistant' ? 'active' : ''} onClick={() => navigate('assistant')}><Icon />报修助手</button>{u.role === 'admin' && <button className={view === 'agents' ? 'active' : ''} onClick={() => navigate('agents')}><Icon />助手设置</button>}{u.role === 'admin' && <button className={view === 'knowledge' ? 'active' : ''} onClick={() => navigate('knowledge')}><Icon />知识库</button>}{u.role === 'admin' && <button className={view === 'audit' ? 'active' : ''} onClick={() => navigate('audit')}><Icon />操作审计</button>}</nav><div className="sidebar-bottom"><span className="small">当前角色</span><strong>{roleNames[u.role]}</strong></div></aside>
     <div className="workspace"><header><span className="header-path">校园设施服务 <span>/</span> {roleNames[u.role]}工作台</span><div className="account"><span className="avatar">{u.display_name.slice(0, 1)}</span><span>{u.display_name}</span><button className="icon-button" onClick={logout} aria-label="退出登录"><Icon kind="logout" /></button></div></header><main><ErrorMessage text={logoutError} />
       <div hidden={view !== 'list'}><OrderList u={u} active={view === 'list'} revision={revision} onOpen={open} onNew={() => navigate('create')} /></div>
       {view === 'create' && <><div className="page-heading"><div><span className="eyebrow">提交故障</span><h1>新建报修</h1><p className="muted">填写位置与故障现象，提交后即可跟进处理。</p></div></div><CreateOrder onCancel={() => navigate('list')} onCreated={o => { setSelected(o.id); setView('detail'); setNotice('报修已提交，等待管理员审核。'); setRevision(v => v + 1); window.scrollTo(0, 0); }} /></>}
       {view === 'detail' && selected && <OrderDetail key={selected} id={selected} u={u} onBack={() => navigate('list')} notice={notice} onSaved={() => setRevision(v => v + 1)} />}
       {view === 'knowledge' && <Knowledge />}
+ {view === 'assistant' && <Assistant onManual={() => navigate('list')} />}
+ {view === 'agents' && u.role === 'admin' && <AgentSettings />}
       {view === 'audit' && <Audit onOpen={open} />}
     </main></div></div>;
 }

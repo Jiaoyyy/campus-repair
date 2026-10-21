@@ -43,6 +43,13 @@ def wait(id,status):
  raise AssertionError('Index did not reach '+status)
 def search(mode='keyword',query='照明报修',token=None):return req('GET','/api/retrieval?mode='+mode+'&q='+urllib.parse.quote(query),token or admin)
 state=root/'tmp/knowledge-mock/mode';state.write_text('ok')
+for attempt in range(80):
+ try:
+  with urllib.request.urlopen(base+'/health/ready',timeout=2) as readiness:
+   if readiness.status==200:break
+ except Exception:pass
+ time.sleep(.25)
+else:raise RuntimeError('Isolated API did not become ready')
 admin=login('admin','SEED_ADMIN_PASSWORD');requester=login('requester','SEED_REQUESTER_PASSWORD');tech=login('tech','SEED_TECH_PASSWORD');other=login('other_admin','SEED_OTHER_PASSWORD')
 expect(401,req('GET','/api/materials'),'anonymous')
 for token in (requester,tech):
@@ -59,8 +66,8 @@ for mode in ('keyword','vector','hybrid'):
  for h in hits:
   src=detail(h['material_id']);check(h['text']==src['text'][h['start']:h['end']] and h['generation']==src['generation'],'range exact')
 expect(200,search(query='不存在的鲸鱼政策'),'no match');check(not expect(200,search(query='鲸鱼星际航线'),'no match')['items'],'no match empty')
-check(not expect(200,search(token=other),'other org empty')['items'],'cross org retrieval empty')
-expect(400,req('GET','/api/retrieval?mode=bad&q=x',admin),'invalid mode');expect(400,req('GET','/api/retrieval?agent_id=1&q=x',admin),'unvalidated agent denied')
+foreign_hits=expect(200,search(token=other),'other org scoped')['items'];check(all(sql(f"SELECT org_id FROM knowledge_materials WHERE id={h['material_id']}")=='2' for h in foreign_hits),'cross org retrieval scoped')
+expect(400,req('GET','/api/retrieval?mode=bad&q=x',admin),'invalid mode');expect(400,req('GET','/api/retrieval?agent_id=invalid&q=x',admin),'invalid agent rejected')
 # Failed rebuild keeps published generation and source bytes.
 state.write_text('fail');expect(202,req('POST',f'/api/materials/{id}/reindex',admin),'reindex');m=wait(id,'failed');check(m['generation']==1 and m['vector_ready'],'old generation retained')
 id2=expect(201,upload(admin,extra='首次嵌入失败测试'),'failure upload')['id'];m2=wait(id2,'failed');check(m2['generation']==1 and not m2['vector_ready'],'first keyword only');check(m2['text'],'failure retains original')

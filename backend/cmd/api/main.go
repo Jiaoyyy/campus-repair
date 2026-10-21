@@ -43,9 +43,11 @@ func main() {
 	if err = app.Initialize(db, c); err != nil {
 		log.Fatal("database initialization failed")
 	}
-	server := &http.Server{Addr: c.Addr, Handler: app.NewServer(db, c.Secret).Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	application := app.NewServer(db, c.Secret)
+	server := &http.Server{Addr: c.Addr, Handler: application.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	stop, done := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer done()
+	go application.RecoverConversations(stop)
 	go func() {
 		<-stop.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

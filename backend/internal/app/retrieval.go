@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -20,9 +21,18 @@ type Evidence struct {
 }
 
 func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
-	// Direct search is a management tool. Future assistant calls must supply a server-validated binding scope.
 	u := current(r)
-	if u.Role != "admin" {
+	agentID, err := agentParam(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if agentID > 0 {
+		if _, err = s.agent(r.Context(), u, agentID, false); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	} else if u.Role != "admin" {
 		s.fail(w, r, denied())
 		return
 	}
@@ -31,52 +41,57 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "keyword"
 	}
-	if q == "" || utf8.RuneCountInString(q) > 500 {
-		s.fail(w, r, bad("检索词须为 1 至 500 字"))
+	hits, err := s.searchKnowledge(r.Context(), u, agentID, q, mode)
+	if err != nil {
+		s.fail(w, r, err)
 		return
+	}
+	if err = writeAudit(r.Context(), s.DB, requestID(r), &u, "knowledge.search", nil, "success", map[string]any{"mode": mode, "hits": len(hits), "agent_id": agentID}); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	scope := "organization_management"
+	if agentID > 0 {
+		scope = "agent_binding"
+	}
+	send(w, 200, map[string]any{"items": hits, "mode": mode, "scope": scope})
+}
+func (s *Server) searchKnowledge(ctx context.Context, u User, agentID int64, q, mode string) ([]Evidence, error) {
+	if q == "" || utf8.RuneCountInString(q) > 500 {
+		return nil, bad("检索词须为 1 至 500 字")
 	}
 	if mode != "keyword" && mode != "vector" && mode != "hybrid" {
-		s.fail(w, r, bad("检索模式无效"))
-		return
+		return nil, bad("检索模式无效")
 	}
-	// Do not accept an unvalidated assistant ID or a fabricated binding scope.
-	if r.URL.Query().Get("agent_id") != "" {
-		s.fail(w, r, bad("助手检索尚未开放，请使用管理材料检索"))
-		return
-	}
+	scope, args := knowledgeScope(u, agentID)
 	keyword, vector := []int64{}, []int64{}
 	if mode != "vector" {
-		rows, err := s.DB.QueryContext(r.Context(), "SELECT c.id FROM knowledge_chunks c JOIN knowledge_materials m ON m.id=c.material_id AND m.published_generation=c.generation WHERE m.org_id=? AND MATCH(c.body) AGAINST(? IN NATURAL LANGUAGE MODE) ORDER BY MATCH(c.body) AGAINST(? IN NATURAL LANGUAGE MODE) DESC,c.id LIMIT 100", u.OrgID, q, q)
+		rows, err := s.DB.QueryContext(ctx, "SELECT c.id FROM knowledge_chunks c JOIN knowledge_materials m ON m.id=c.material_id AND m.published_generation=c.generation WHERE "+scope+" AND MATCH(c.body) AGAINST(? IN NATURAL LANGUAGE MODE) ORDER BY MATCH(c.body) AGAINST(? IN NATURAL LANGUAGE MODE) DESC,c.id LIMIT 100", append(append([]any{}, args...), q, q)...)
 		if err != nil {
-			s.fail(w, r, err)
-			return
+			return nil, err
 		}
 		for rows.Next() {
 			var id int64
 			if err = rows.Scan(&id); err != nil {
 				rows.Close()
-				s.fail(w, r, err)
-				return
+				return nil, err
 			}
 			keyword = append(keyword, id)
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			s.fail(w, r, err)
-			return
+			return nil, err
 		}
 	}
 	if mode != "keyword" {
 		v := vectorConfig()
 		if !v.configured() {
-			s.fail(w, r, &Problem{503, "vector_unavailable", "向量检索未配置，可改用关键词检索"})
-			return
+			return nil, &Problem{503, "vector_unavailable", "向量检索未配置，可改用关键词检索"}
 		}
-		rows, err := s.DB.QueryContext(r.Context(), "SELECT id,vector_ready,vector_collection FROM knowledge_materials WHERE org_id=? AND published_generation>0", u.OrgID)
+		rows, err := s.DB.QueryContext(ctx, "SELECT m.id,m.vector_ready,m.vector_collection FROM knowledge_materials m WHERE "+scope+" AND m.published_generation>0", args...)
 		if err != nil {
-			s.fail(w, r, err)
-			return
+			return nil, err
 		}
 		materials := []int64{}
 		incomplete := false
@@ -86,8 +101,7 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 			var collection string
 			if err = rows.Scan(&id, &ready, &collection); err != nil {
 				rows.Close()
-				s.fail(w, r, err)
-				return
+				return nil, err
 			}
 			if !ready || collection != v.Collection {
 				incomplete = true
@@ -98,20 +112,17 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			s.fail(w, r, err)
-			return
+			return nil, err
 		}
 		if incomplete {
-			s.fail(w, r, &Problem{503, "vector_unavailable", "部分材料尚无当前模型的向量索引，请重建或使用关键词检索"})
-			return
+			return nil, &Problem{503, "vector_unavailable", "部分材料尚无当前模型的向量索引，请重建或使用关键词检索"}
 		}
 		// Check the dependency even when no materials exist; an outage is not an empty result.
-		if err = v.ensure(r.Context()); err == nil {
-			vector, err = v.search(r.Context(), u.OrgID, q, materials)
+		if err = v.ensure(ctx); err == nil {
+			vector, err = v.search(ctx, u.OrgID, q, materials)
 		}
 		if err != nil {
-			s.fail(w, r, &Problem{503, "vector_unavailable", "向量服务暂不可用，可改用关键词检索"})
-			return
+			return nil, &Problem{503, "vector_unavailable", "向量服务暂不可用，可改用关键词检索"}
 		}
 	}
 	// Recheck authorization/current generation BEFORE calculating each route's RRF ranks.
@@ -126,13 +137,12 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 			}
 			seen[id] = true
 			var e Evidence
-			err := s.DB.QueryRowContext(r.Context(), "SELECT c.id,m.id,c.generation,m.title,m.demo,c.sequence_no,c.start_char,c.end_char,c.body FROM knowledge_chunks c JOIN knowledge_materials m ON m.id=c.material_id AND m.published_generation=c.generation WHERE c.id=? AND m.org_id=?", id, u.OrgID).Scan(&e.ID, &e.MaterialID, &e.Generation, &e.Title, &e.Demo, &e.Sequence, &e.Start, &e.End, &e.Text)
+			err := s.DB.QueryRowContext(ctx, "SELECT c.id,m.id,c.generation,m.title,m.demo,c.sequence_no,c.start_char,c.end_char,c.body FROM knowledge_chunks c JOIN knowledge_materials m ON m.id=c.material_id AND m.published_generation=c.generation WHERE c.id=? AND "+scope, append([]any{id}, args...)...).Scan(&e.ID, &e.MaterialID, &e.Generation, &e.Title, &e.Demo, &e.Sequence, &e.Start, &e.End, &e.Text)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			if err != nil {
-				s.fail(w, r, err)
-				return
+				return nil, err
 			}
 			position++
 			scores[id] += 1 / float64(60+position)
@@ -154,12 +164,9 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 	if len(hits) > 4 {
 		hits = hits[:4]
 	}
-	if err := writeAudit(r.Context(), s.DB, requestID(r), &u, "knowledge.search", nil, "success", map[string]any{"mode": mode, "hits": len(hits)}); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	send(w, 200, map[string]any{"items": hits, "mode": mode, "scope": "organization_management"})
+	return hits, nil
 }
+
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	v := vectorConfig()
 	state := "unconfigured"
@@ -169,5 +176,5 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			state = "unavailable"
 		}
 	}
-	send(w, 200, map[string]any{"work_orders": true, "knowledge": true, "keyword": true, "vector": state, "assistant": false, "mcp": false, "message": "材料管理与检索已开放；助手和 MCP 待接入。向量 configured 仅表示参数和集合可用，不代表网关调用已验证。"})
+	send(w, 200, map[string]any{"work_orders": true, "knowledge": true, "keyword": true, "vector": state, "assistant": chatConfig().configured(), "mcp": false, "chat": map[bool]string{true: "configured", false: "unconfigured"}[chatConfig().configured()], "message": "助手按角色及材料绑定查询。configured 表示服务端参数已配置，实际调用仍可能失败。"})
 }
