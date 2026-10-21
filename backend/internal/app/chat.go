@@ -169,8 +169,9 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	toolName, toolArguments := mcpIntent(u.Role, input.Content)
 	g := chatConfig()
-	if !g.configured() {
+	if !g.configured() && toolName == "" {
 		s.fail(w, r, &Problem{503, "chat_unconfigured", "对话服务尚未配置，请继续使用人工报修或联系管理员"})
 		return
 	}
@@ -200,11 +201,38 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 			_ = s.finishTurn(turn, u, status, output, warning, requestID(r), nil)
 		}
 	}()
-	if writeSSE(w, "meta", map[string]any{"conversation_id": id, "message_id": turn.MessageID, "request_id": requestID(r), "skill": "none", "agent_version": turn.Agent.Version}) != nil {
+	if writeSSE(w, "meta", map[string]any{"conversation_id": id, "message_id": turn.MessageID, "request_id": requestID(r), "skill": "none", "tool": toolName, "agent_version": turn.Agent.Version}) != nil {
 		return
 	}
 	terminate := func(code, message string) {
 		_ = writeSSE(w, "error", map[string]any{"code": code, "message": message, "message_id": turn.MessageID, "partial": output})
+	}
+	if toolName != "" {
+		result, callErr := s.callMCPTool(ctx, r, c.AgentID, toolName, toolArguments)
+		if callErr != nil {
+			terminate("tool_unavailable", "实时工单查询暂不可用或该助手未绑定工具，请返回人工工单页面查看")
+			return
+		}
+		answer, formatErr := formatMCPAnswer(toolName, result)
+		if formatErr != nil {
+			terminate("tool_unavailable", "实时工单查询未取得有效结果，请返回人工工单页面查看")
+			return
+		}
+		output = answer
+		if err = s.savePartial(ctx, turn, answer); err != nil {
+			terminate("store_unavailable", "查询结果未能保存，请返回人工工单页面查看")
+			return
+		}
+		if err = writeSSE(w, "delta", map[string]string{"text": answer}); err != nil {
+			return
+		}
+		if err = s.finishTurn(turn, u, "complete", answer, "", requestID(r), nil); err != nil {
+			terminate("configuration_changed", "身份或助手配置已变化，本轮结果未确认，请刷新后重试")
+			return
+		}
+		completed = true
+		_ = writeSSE(w, "done", map[string]any{"message_id": turn.MessageID, "answer": answer, "citations": []Citation{}, "warning": ""})
+		return
 	}
 	query := []rune(strings.TrimSpace(input.Content))
 	if len(query) > 500 {

@@ -9,7 +9,8 @@ lines=[]
 for line in text.splitlines():
  if '=' in line and not line.startswith('#'):
   key,value=line.split('=',1)
-  if not value: line=key+'='+secrets.token_hex(24 if key!='SESSION_SECRET' else 32)
+  if not value and (key in ('DB_PASSWORD','DB_ROOT_PASSWORD','SESSION_SECRET','MCP_CALL_SECRET') or key.startswith('SEED_')):
+   line=key+'='+secrets.token_hex(32 if key in ('SESSION_SECRET','MCP_CALL_SECRET') else 24)
  lines.append(line)
 fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as f:f.write('\n'.join(lines)+'\n')

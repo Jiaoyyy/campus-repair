@@ -42,6 +42,8 @@ services:
       DB_USER: ${DB_USER:-campus_repair}
       DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      MCP_CALL_SECRET: ${MCP_CALL_SECRET:-}
+      MCP_SERVER_URL: http://mcp:8081/mcp
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
       SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD:?set SEED_REQUESTER_PASSWORD}
       SEED_REQUESTER2_PASSWORD: ${SEED_REQUESTER2_PASSWORD:?set SEED_REQUESTER2_PASSWORD}
@@ -62,6 +64,13 @@ services:
   worker:
     build: ./backend
     command: ["/app/worker"]
+    environment: *backend-env
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  mcp:
+    build: ./backend
+    command: ["/app/mcp"]
     environment: *backend-env
     depends_on:
       api: {condition: service_healthy}

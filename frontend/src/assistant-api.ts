@@ -1,6 +1,6 @@
 import { APIError, tokenKey } from './api';
 export type Citation = { number: number; chunk_id: number; material_id: number; generation: number; title: string; demo: boolean; sequence: number; start: number; end: number; text: string };
-export type Agent = { id: number; name: string; role: string; prompt?: string; enabled: boolean; version: number; material_ids: number[] };
+export type Agent = { id: number; name: string; role: string; prompt?: string; enabled: boolean; version: number; material_ids: number[]; tool_names?: string[] };
 export type Conversation = { id: number; agent_id: number; title: string; agent_name: string; updated_at: string };
 export type Message = { id: number; role: string; content: string; status: string; warning: string; citations: Citation[]; created_at?: string };
 export type StreamEvent = { event: string; data: { text?: string; answer?: string; message_id?: number; citations?: Citation[]; warning?: string; message?: string } };

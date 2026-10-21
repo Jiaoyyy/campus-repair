@@ -10,13 +10,14 @@ import (
 )
 
 type Agent struct {
-	ID        int64   `json:"id"`
-	Name      string  `json:"name"`
-	Role      string  `json:"role"`
-	Prompt    string  `json:"prompt,omitempty"`
-	Enabled   bool    `json:"enabled"`
-	Version   int64   `json:"version"`
-	Materials []int64 `json:"material_ids"`
+	ID        int64    `json:"id"`
+	Name      string   `json:"name"`
+	Role      string   `json:"role"`
+	Prompt    string   `json:"prompt,omitempty"`
+	Enabled   bool     `json:"enabled"`
+	Version   int64    `json:"version"`
+	Materials []int64  `json:"material_ids"`
+	Tools     []string `json:"tool_names,omitempty"`
 }
 
 const agentColumns = "id,name,role,prompt,enabled,version"
@@ -101,6 +102,27 @@ func (s *Server) agents(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, err)
 				return
 			}
+			rows, err = s.DB.QueryContext(r.Context(), "SELECT tool_name FROM agent_tools WHERE agent_id=? AND enabled=TRUE ORDER BY tool_name", items[i].ID)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+			items[i].Tools = []string{}
+			for rows.Next() {
+				var name string
+				if err = rows.Scan(&name); err != nil {
+					rows.Close()
+					s.fail(w, r, err)
+					return
+				}
+				items[i].Tools = append(items[i].Tools, name)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
 		}
 	}
 	send(w, 200, map[string]any{"items": items})
@@ -126,6 +148,63 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	if a.Name == "" || utf8.RuneCountInString(a.Name) > 100 || a.Prompt == "" || utf8.RuneCountInString(a.Prompt) > 4000 || (a.Role != "requester" && a.Role != "technician" && a.Role != "admin") || len(a.Materials) > 100 {
 		s.fail(w, r, bad("请填写名称（100字内）、提示词（4000字内）、角色及最多100份材料"))
 		return
+	}
+	seenTools := map[string]bool{}
+	for _, name := range a.Tools {
+		if mcpRoles[name] != a.Role || seenTools[name] {
+			s.fail(w, r, bad("工具不在该角色的只读白名单内或重复"))
+			return
+		}
+		seenTools[name] = true
+	}
+	currentTools := map[string]bool{}
+	if a.Tools != nil {
+		rows, e := s.DB.QueryContext(r.Context(), "SELECT t.tool_name FROM agent_tools t JOIN agents a ON a.id=t.agent_id WHERE t.agent_id=? AND a.org_id=? AND t.enabled=TRUE", id, u.OrgID)
+		if e != nil {
+			s.fail(w, r, e)
+			return
+		}
+		for rows.Next() {
+			var name string
+			if e = rows.Scan(&name); e != nil {
+				break
+			}
+			currentTools[name] = true
+		}
+		if e == nil {
+			e = rows.Err()
+		}
+		rows.Close()
+		if e != nil {
+			s.fail(w, r, e)
+			return
+		}
+	}
+	toolBindingChanged := a.Tools != nil && (len(a.Tools) != len(currentTools))
+	for _, name := range a.Tools {
+		if !currentTools[name] {
+			toolBindingChanged = true
+		}
+	}
+	if len(a.Tools) > 0 && toolBindingChanged {
+		found, _, discoverErr := s.discoveredMCP(r.Context(), r)
+		if discoverErr != nil {
+			s.fail(w, r, &Problem{503, "mcp_unavailable", "工具发现暂不可用，未保存绑定"})
+			return
+		}
+		for _, name := range a.Tools {
+			matched := false
+			for _, tool := range found {
+				if tool.Name == name {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				s.fail(w, r, bad("工具未由 MCP Server 发现"))
+				return
+			}
+		}
 	}
 	tx, err := s.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -171,8 +250,18 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = tx.ExecContext(r.Context(), "INSERT INTO agent_materials VALUES(?,?)", id, mid)
 	}
+	if err == nil && toolBindingChanged {
+		_, err = tx.ExecContext(r.Context(), "DELETE FROM agent_tools WHERE agent_id=?", id)
+	}
+	if err == nil && toolBindingChanged {
+		for _, name := range a.Tools {
+			if _, err = tx.ExecContext(r.Context(), "INSERT INTO agent_tools(agent_id,tool_name,enabled) VALUES(?,?,TRUE)", id, name); err != nil {
+				break
+			}
+		}
+	}
 	if err == nil {
-		err = writeAudit(r.Context(), tx, requestID(r), &u, "agent.update", id, "success", map[string]any{"version": version + 1, "material_count": len(a.Materials), "enabled": a.Enabled})
+		err = writeAudit(r.Context(), tx, requestID(r), &u, "agent.update", id, "success", map[string]any{"version": version + 1, "material_count": len(a.Materials), "enabled": a.Enabled, "tool_count": len(a.Tools)})
 	}
 	if err == nil {
 		err = tx.Commit()

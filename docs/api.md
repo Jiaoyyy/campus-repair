@@ -1,6 +1,6 @@
 # 已实现接口
 
-接口已实现登录、人工工单、材料管理及带引用的角色资料问答。技能与 MCP 尚未实现；能力接口按服务配置返回实际状态。
+接口已实现登录、人工工单、材料管理、带引用的角色资料问答及内部只读 MCP 查询。三项技能和模型原生工具调用尚未实现；能力接口按服务配置返回实际状态。
 
 ## 通用规则
 
@@ -81,7 +81,7 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 
 检索 item 含 chunk_id、material_id、generation、title、demo、sequence、start、end、text、score；范围为从 0 开始的 Unicode 字符 `[start,end)`。两路候选各最多 100 个，授权/版本复核后按 RRF 排序返回最多 4 条。无命中 200 + 空 items；向量配置、嵌入、Qdrant 故障或存在不兼容的已发布材料返回 503 + vector_unavailable，提供关键词方式。有效 agent_id 使用角色绑定范围；非法编号 400，其他组织或角色的助手 404。
 
-/api/capabilities 现返回 knowledge=true、keyword=true、vector=unconfigured/configured/unavailable；configured 仅表示参数齐全且 Qdrant 集合可用，不保证嵌入网关下一次调用成功。assistant 由 CHAT_* 是否齐全决定，chat 返回 configured/unconfigured；mcp 仍为 false。未配置嵌入不影响 /health/ready 或人工业务。
+/api/capabilities 现返回 knowledge=true、keyword=true、vector=unconfigured/configured/unavailable；configured 仅表示参数齐全且 Qdrant 集合可用，不保证嵌入网关下一次调用成功。chat 返回 configured/unconfigured；mcp 表示内部 MCP 服务在线，assistant 为 chat 已配置或 MCP 在线。单次工具调用仍须绑定和授权。未配置嵌入/MCP 不影响 /health/ready 或人工业务。
 
 切片、租约、模型维度切换和恢复操作见 [知识库说明](knowledge.md)。
 
@@ -90,8 +90,9 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 | 接口 | 约束 / 返回 |
 | --- | --- |
 | GET /api/agents | 当前组织、角色且启用的助手；不返回提示词 |
-| GET /api/agents?manage=1 | 仅管理员；本组织配置、version 和 material_ids |
-| PUT /api/agents/{id} | 仅管理员；name、role、prompt、enabled、version、material_ids；冲突 409，越界绑定 400 |
+| GET /api/agents?manage=1 | 仅管理员；本组织配置、version、material_ids、tool_names |
+| GET /api/mcp/tools | 仅管理员；通过内部 MCP Client 发现固定只读工具及输入 schema |
+| PUT /api/agents/{id} | 仅管理员；name、role、prompt、enabled、version、material_ids、tool_names；冲突 409，越界绑定 400 |
 | GET /api/retrieval?agent_id=...&q=...&mode=... | 校验助手角色/组织/启用，限绑定且已发布材料；scope=agent_binding |
 | POST /api/conversations | agent_id；201 返回 conversation，创建时重读配置 |
 | GET /api/conversations | 仅本人，page/page_size 分页 |
@@ -101,6 +102,6 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 
 会话所有权对管理员也适用；同组织他人的会话和不存在 ID 一样返回 404。助手停用后本人可读历史，但不能新发消息或打开失效来源。消息状态 pending/generating/complete/failed/cancelled；只有 complete 消息进入最近十条上下文。并发生成 409，无模型配置 503 + chat_unconfigured。
 
-SSE 事件：meta（会话/消息/请求/配置版本、skill=none）、delta（text）、done（message_id/answer/citations/warning）或 error（code/message/partial）。实际 citation 含 number 及检索 Evidence 字段；无效编号移除并标明无法验证，不将候选都当引用。中断返回部分正文并持久化；历史和来源读取重新验证绑定及索引版本。
+SSE 事件：meta（会话/消息/请求/配置版本、skill=none、可选 tool）、delta（text）、done（message_id/answer/citations/warning）或 error（code/message/partial）。明确的工单进度/已分配任务/可派人员问题会调用对应已绑定的只读 MCP 工具并返回真实数据，失败使用 tool_unavailable，不伪造实时结果。实际 citation 含 number 及检索 Evidence 字段；无效编号移除并标明无法验证，不将候选都当引用。中断返回部分正文并持久化；历史和来源读取重新验证绑定及索引版本。
 
 配置、恢复、超时与当前边界见 [助手说明](assistant.md)。
