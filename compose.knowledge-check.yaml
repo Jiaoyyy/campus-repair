@@ -1,0 +1,14 @@
+services:
+  embedding-mock:
+    image: python:3.12-alpine
+    command: ["python", "/test/mock_embedding.py"]
+    volumes: ["./apitest:/test:ro", "./tmp/knowledge-mock:/state"]
+  api:
+    environment: &mock-embedding
+      EMBEDDING_BASE_URL: http://embedding-mock:8080/v1
+      EMBEDDING_API_KEY: isolated-mock-only
+      EMBEDDING_MODEL: mock-4
+      EMBEDDING_DIMENSION: "4"
+      EMBEDDING_COLLECTION: check_v1
+  worker:
+    environment: *mock-embedding

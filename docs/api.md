@@ -63,3 +63,24 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 - 可与原有状态、类别、位置及分页条件叠加；无效 queue 返回 400。
 
 审计项保留原 ID 与请求标识，并附加 `actor_name` 和 `order_number`。名称/编号只关联同组织资源；非工单操作的编号为空。界面以中文动作、人员名称和工单编号展示，点击工单后仍按普通详情权限校验。
+
+## 材料与管理检索
+
+当前接口均需管理员 Bearer，范围为登录组织；非管理员 403，跨组织材料 404。助手绑定检索尚未开放。详情、列表与下载均禁缓存。
+
+| 接口 | 输入 / 返回 |
+| --- | --- |
+| GET /api/materials | page / page_size；items、total、page、page_size |
+| POST /api/materials | multipart：title（1–200 字）、demo（true/false）、file；201 返回 id/status=pending |
+| GET /api/materials/{id} | material 含 title、filename、demo、status、error、generation、vector_ready、created_at、text |
+| GET /api/materials/{id}/file | 原始文件字节，Content-Disposition attachment；需 Authorization，不能把令牌放 URL |
+| POST /api/materials/{id}/reindex | 202 返回 id/status/generation；已有 pending/processing 任务返回 409 |
+| GET /api/retrieval | q（1–500 字）、mode=keyword/vector/hybrid，默认 keyword；返回 items/mode/scope=organization_management |
+
+材料扩展名、UTF-8、空白校验失败 400，文件超过 10 MiB 返回 413。索引状态为 pending / processing / ready / failed；generation 为 0 表示尚无可检索版本，failed 仍可有旧可用版本。原文内容不可修改或删除。
+
+检索 item 含 chunk_id、material_id、generation、title、demo、sequence、start、end、text、score；范围为从 0 开始的 Unicode 字符 `[start,end)`。两路候选各最多 100 个，授权/版本复核后按 RRF 排序返回最多 4 条。无命中 200 + 空 items；向量配置、嵌入、Qdrant 故障或存在不兼容的已发布材料返回 503 + vector_unavailable，提供关键词方式。传 agent_id 返回 400，不能冒充已完成助手绑定检索。
+
+/api/capabilities 现返回 knowledge=true、keyword=true、vector=unconfigured/configured/unavailable；configured 仅表示参数齐全且 Qdrant 集合可用，不保证嵌入网关下一次调用成功。assistant、mcp 仍为 false。未配置嵌入不影响 /health/ready 或人工业务。
+
+切片、租约、模型维度切换和恢复操作见 [知识库说明](knowledge.md)。

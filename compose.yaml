@@ -19,9 +19,20 @@ services:
     image: qdrant/qdrant:v1.15.5
     volumes: ["vector-data:/qdrant/storage"]
     restart: unless-stopped
+  uploads-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "chown 10001:10001 /data/uploads && chmod 700 /data/uploads"]
+    volumes: ["uploads:/data/uploads"]
+    restart: "no"
   api:
     build: ./backend
-    environment:
+    environment: &backend-env
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      EMBEDDING_COLLECTION: ${EMBEDDING_COLLECTION:-repair_v1}
+      QDRANT_URL: http://qdrant:6333
       DB_HOST: db:3306
       DB_NAME: ${DB_NAME:-campus_repair}
       DB_USER: ${DB_USER:-campus_repair}
@@ -36,12 +47,20 @@ services:
     volumes: ["uploads:/data/uploads"]
     depends_on:
       db: {condition: service_healthy}
+      uploads-init: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health/ready"]
       interval: 2s
       timeout: 3s
       retries: 30
       start_period: 5s
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    command: ["/app/worker"]
+    environment: *backend-env
+    depends_on:
+      api: {condition: service_healthy}
     restart: unless-stopped
   web:
     build:
