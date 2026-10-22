@@ -95,3 +95,32 @@ func TestMCPArgumentsRejectIdentityFields(t *testing.T) {
 		t.Fatal("model org accepted")
 	}
 }
+
+func TestNaturalReadOnlyQuestions(t *testing.T) {
+	for _, tt := range []struct{ role, q, want string }{
+		{"requester", "我报的维修到哪一步了？", MCPMyOrders},
+		{"requester", "宿舍灯坏了，不知道怎么报修", ""},
+		{"technician", "今天派给我的有哪些活？", MCPAssignedOrders},
+		{"requester", "今天派给我的有哪些活？", ""},
+		{"admin", "照明有几位师傅可以安排？", MCPDispatch},
+		{"admin", "我们有几个师傅？", ""},
+		{"technician", "照明有几位师傅可以安排？", ""},
+	} {
+		got, _ := mcpIntent(tt.role, tt.q)
+		if got != tt.want {
+			t.Fatalf("%s %q: %q", tt.role, tt.q, got)
+		}
+	}
+	history := []chatMessage{{Role: "user", Content: "我们有几个师傅？"}, {Role: "assistant", Content: "想了解哪类维修人员？"}}
+	tool, args := followupMCPIntent("admin", "照明的", history)
+	if tool != MCPDispatch || args.(map[string]any)["category"] != "lighting" {
+		t.Fatal("category clarification did not route authorized query")
+	}
+	if tool, _ := followupMCPIntent("requester", "照明的", history); tool != "" {
+		t.Fatal("follow-up expanded role permissions")
+	}
+	note := assistantContextNote("admin", "我们有几个师傅？", nil, assistantKnowledge{State: "not_requested"})
+	if !strings.Contains(note, "不指定") && !strings.Contains(note, "未指定") {
+		t.Fatal("missing category needs clarification")
+	}
+}

@@ -97,7 +97,7 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 | POST /api/conversations | agent_id；201 返回 conversation，创建时重读配置 |
 | GET /api/conversations | 仅本人，page/page_size 分页 |
 | GET /api/conversations/{id}/messages | 仅本人；最近页默认 20 条，页内按时间顺序，返回 conversation/items/total/page |
-| POST /api/conversations/{id}/messages | content（1–2000 个 Unicode 字符）、mode（默认 keyword）；fetch SSE，不能自动重试 |
+| POST /api/conversations/{id}/messages | content（1–2000 个 Unicode 字符）；fetch SSE，检索由服务端决定，不能自动重试 |
 | GET /api/conversations/{id}/citations/{message}/{chunk} | 本人已完成消息实际引用且当前仍授权；返回 evidence 和完整原文 text，不可见 404 |
 
 会话所有权对管理员也适用；同组织他人的会话和不存在 ID 一样返回 404。助手停用后本人可读历史，但不能新发消息或打开失效来源。消息状态 pending/generating/complete/failed/cancelled；只有 complete 消息进入最近十条上下文。并发生成 409，无模型配置 503 + chat_unconfigured。
@@ -105,3 +105,5 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 SSE 事件：meta（会话/消息/请求/配置版本、skill=none、可选 tool）、delta（text）、done（message_id/answer/citations/warning）或 error（code/message/partial）。明确的工单进度/已分配任务/可派人员问题会调用对应已绑定的只读 MCP 工具并返回真实数据，失败使用 tool_unavailable，不伪造实时结果。实际 citation 含 number 及检索 Evidence 字段；无效编号移除并标明无法验证，不将候选都当引用。中断返回部分正文并持久化；历史和来源读取重新验证绑定及索引版本。
 
 配置、恢复、超时与当前边界见 [助手说明](assistant.md)。
+
+对话接口为兼容旧客户端仍接收合法的 mode 字符串，但不采用该值选择检索算法；新客户端只发送 content。问候不检索；报修相关问题自动使用授权资料，无材料/无命中仍调用模型。混合查询失败可回退关键词并在 done.warning 明确降级，全部检索不可用也可继续追问但不能核实制度事实。管理 GET /api/retrieval 的显式 mode 与 503 契约保持。

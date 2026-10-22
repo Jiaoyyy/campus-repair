@@ -96,7 +96,7 @@ for text in (' ', '灯'*2001):expect(400,req('POST',f'/api/conversations/{c}/mes
 mode('fake');events=turn(c);done=events[-1][1];check('[999]' not in done['answer'] and done['warning'] and len(done['citations'])==1,'invalid citation rejected');check(all('[999]' not in e[1].get('text','') for e in events),'invalid marker never streamed')
 mode('unused');done=turn(c)[-1][1];check(not done['citations'] and done['warning'],'unused candidates are not references')
 mode('unsafe');done=turn(c)[-1][1];check('第一步' not in done['answer'] and not done['citations'],'unsafe steps blocked')
-mode('ok');before=len(calls());done=turn(c,'鲸鱼星际维修时限规定')[-1][1];check('未找到' in done['answer'] and not done['citations'] and len(calls())==before,'no evidence no invented policy')
+mode('ok');before=len(calls());done=turn(c,'鲸鱼星际维修时限规定')[-1][1];check('无法确认' in done['answer'] and not done['citations'] and len(calls())==before+1,'model handles unverified policy without invented citation')
 # Failed messages and inputs never enter the next completed-history context.
 mode('disconnect');check(turn(c,'照明报修失败上下文不能用')[-1][0]=='error','interruption explicit');history=messages(c);check(history[-1]['status']=='failed' and history[-1]['content'],'partial persisted')
 for m in ('fail','malformed','timeout','tools'):
@@ -116,7 +116,20 @@ short=login('requester','SEED_REQUESTER_PASSWORD');res=open_stream(c,token=short
 # Reconfiguration during a round prevents a completed claim and future model calls.
 res=open_stream(c);event(res);event(res);configure(aid,enabled=False);ev=consume(res);check(ev[-1][0]=='error','disabled during generation');before=len(calls());expect(409,req('POST',f'/api/conversations/{c}/messages',requester,{'content':'照明报修'}),'disabled send');check(len(calls())==before,'disabled no model call');check(messages(c),'disabled retains own history');expect(404,req('GET',source_path,requester),'disabled original rejected')
 configure(aid,enabled=True,material_ids=[]);check(not expect(200,req('GET',f'/api/retrieval?agent_id={aid}&q='+urllib.parse.quote('照明报修'),requester),'unbind')['items'],'unbind removes search');expect(404,req('GET',source_path,requester),'unbound citation denied');h=messages(c);check(any(m['warning'] and not m['citations'] for m in h if m['role']=='assistant' and m['status']=='complete'),'history revalidates citations')
+mode('ok');general=create(aid);before=len(calls());hello=turn(general,'你好，你能做什么？')[-1][1];check('你好' in hello['answer'] and not hello['citations'] and len(calls())==before+1,'greeting reaches model without materials')
+fault=turn(general,'宿舍灯坏了')[-1][1];check('房间' in fault['answer'] and not fault['citations'],'unbound fault asks missing information')
+follow=turn(general,'三号楼201')[-1][1];check('201' in follow['answer'] and '哪栋' not in follow['answer'],'follow-up keeps provided location');check(any(m['content']=='宿舍灯坏了' for m in calls()[-1]['messages']),'model receives completed repair context')
 configure(aid,enabled=True,material_ids=[m1,m2]);mode('ok');latest=turn(c)[-1][1];cite=latest['citations'][0];path=f'/api/conversations/{c}/citations/{latest["message_id"]}/{cite["chunk_id"]}'
+# Automatic retrieval fails over visibly; unavailable evidence does not stop clarification.
+(state/'mode').write_text('fail')
+try:
+ degraded=turn(create(aid))[-1][1];check(degraded['warning'] and degraded['citations'],'embedding failure falls back to authorized text evidence')
+finally:(state/'mode').write_text('ok')
+dc('stop','worker');sql('RENAME TABLE knowledge_chunks TO knowledge_chunks_temporarily_unavailable')
+try:
+ unavailable=turn(create(aid),'宿舍灯坏了')[-1][1];check('资料查询暂不可用' in unavailable['warning'] and not unavailable['citations'],'all search failures remain explicit while dialogue continues')
+finally:
+ sql('RENAME TABLE knowledge_chunks_temporarily_unavailable TO knowledge_chunks');dc('start','worker')
 expect(202,req('POST',f'/api/materials/{cite["material_id"]}/reindex',admin),'reindex cited source')
 for _ in range(80):
  m=expect(200,req('GET',f'/api/materials/{cite["material_id"]}',admin),'wait publish')['material']
@@ -135,6 +148,13 @@ h=messages(c);check(h[-1]['status']=='failed' and '中断' in h[-1]['warning'],'
 # Tech/admin roles also get their own assistant, no operational writes exposed.
 for agent,token in ((ta['id'],tech),(aa['id'],admin)):
  cid=create(agent,token);check(turn(cid,token=token)[-1][0]=='done','role assistant answer')
+# Natural wording and category follow-up use the same bound, role-scoped MCP path.
+configure(aid,tool_names=['get_my_work_orders']);natural=create(aid)
+events=turn(natural,'我报的维修到哪一步了？');check(events[0][1]['tool']=='get_my_work_orders' and events[-1][0]=='done','natural requester progress uses MCP')
+configure(aa['id'],tool_names=['list_dispatch_candidates']);dispatch=create(aa['id'],admin)
+events=turn(dispatch,'我们有几个师傅？',admin);check(not events[0][1]['tool'],'missing category never queries invented all-staff count')
+events=turn(dispatch,'照明的',admin);check(events[0][1]['tool']=='list_dispatch_candidates' and events[-1][0]=='done','category follow-up uses real authorized MCP')
+configure(aid,tool_names=[]);events=turn(create(aid),'我报的维修到哪一步了？');check(events[-1][0]=='error','natural wording cannot bypass tool binding')
 check(sql("SELECT CONCAT(COUNT(*),':',COALESCE(SUM(version),0)) FROM work_orders")==orders_before,'assistant and rejected tools never mutate work orders')
 check(sql("SELECT COUNT(*) FROM audit_events WHERE metadata LIKE '%失败上下文不能用%'")=='0','no private dialogue in audit')
 for secret_value in (env['SEED_ADMIN_PASSWORD'],env['SESSION_SECRET'],'isolated-chat-mock-only'):
