@@ -176,5 +176,6 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			state = "unavailable"
 		}
 	}
-	send(w, 200, map[string]any{"work_orders": true, "knowledge": true, "keyword": true, "vector": state, "assistant": chatConfig().configured(), "mcp": false, "chat": map[bool]string{true: "configured", false: "unconfigured"}[chatConfig().configured()], "message": "助手按角色及材料绑定查询。configured 表示服务端参数已配置，实际调用仍可能失败。"})
+	mcpReady := mcpAvailable(r.Context())
+	send(w, 200, map[string]any{"work_orders": true, "knowledge": true, "keyword": true, "vector": state, "assistant": chatConfig().configured() || mcpReady, "mcp": mcpReady, "chat": map[bool]string{true: "configured", false: "unconfigured"}[chatConfig().configured()], "message": "助手按角色及材料绑定查询。MCP 可用仅表示内部服务在线，单次工具调用仍须授权。"})
 }

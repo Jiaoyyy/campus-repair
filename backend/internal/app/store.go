@@ -26,7 +26,7 @@ func Initialize(db *sql.DB, c Config) error {
 			}
 		}
 	}
-	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6))"); err != nil {
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6)),(4,UTC_TIMESTAMP(6))"); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)

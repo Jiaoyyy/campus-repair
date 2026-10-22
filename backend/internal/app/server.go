@@ -81,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/logout", s.protect(s.logout))
 	m.HandleFunc("GET /api/me", s.protect(func(w http.ResponseWriter, r *http.Request) { send(w, 200, map[string]any{"user": current(r)}) }))
 	m.HandleFunc("GET /api/agents", s.protect(s.agents))
+	m.HandleFunc("GET /api/mcp/tools", s.protect(s.mcpDiscover))
 	m.HandleFunc("PUT /api/agents/{id}", s.protect(s.updateAgent))
 	m.HandleFunc("GET /api/conversations", s.protect(s.conversations))
 	m.HandleFunc("POST /api/conversations", s.protect(s.createConversation))
