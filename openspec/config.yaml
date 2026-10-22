@@ -13,7 +13,8 @@ context: |
   React/TypeScript、Go、MySQL、Qdrant、Nginx、Docker Compose；Bearer登录。
   密钥仅在服务端，模拟数据与知识库须标明演示用途，最终公网部署。
   不做付款、库存采购、SSO、多校区运营、原生App、AI自动派单。
-  当前为全新项目，规划不能写成已实现事实，不从CampusClaw复制环境或数据。
+  当前人工工单第一阶段已实现；AI、知识库、MCP与公网仍待实施。
+  规划不能写成已实现事实，不从CampusClaw复制环境或数据。
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.

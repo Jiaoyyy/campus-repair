@@ -1,0 +1,80 @@
+name: campus-repair
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-campus_repair}
+      MYSQL_USER: ${DB_USER:-campus_repair}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--ngram_token_size=2"]
+    volumes: ["db-data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    volumes: ["vector-data:/qdrant/storage"]
+    restart: unless-stopped
+  uploads-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "chown 10001:10001 /data/uploads && chmod 700 /data/uploads"]
+    volumes: ["uploads:/data/uploads"]
+    restart: "no"
+  api:
+    build: ./backend
+    environment: &backend-env
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-115}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      EMBEDDING_COLLECTION: ${EMBEDDING_COLLECTION:-repair_v1}
+      QDRANT_URL: http://qdrant:6333
+      DB_HOST: db:3306
+      DB_NAME: ${DB_NAME:-campus_repair}
+      DB_USER: ${DB_USER:-campus_repair}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
+      SEED_REQUESTER_PASSWORD: ${SEED_REQUESTER_PASSWORD:?set SEED_REQUESTER_PASSWORD}
+      SEED_REQUESTER2_PASSWORD: ${SEED_REQUESTER2_PASSWORD:?set SEED_REQUESTER2_PASSWORD}
+      SEED_TECH_PASSWORD: ${SEED_TECH_PASSWORD:?set SEED_TECH_PASSWORD}
+      SEED_TECH2_PASSWORD: ${SEED_TECH2_PASSWORD:?set SEED_TECH2_PASSWORD}
+      SEED_OTHER_PASSWORD: ${SEED_OTHER_PASSWORD:?set SEED_OTHER_PASSWORD}
+    volumes: ["uploads:/data/uploads"]
+    depends_on:
+      db: {condition: service_healthy}
+      uploads-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+  worker:
+    build: ./backend
+    command: ["/app/worker"]
+    environment: *backend-env
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    ports: ["127.0.0.1:${WEB_PORT:-18083}:80"]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  db-data:
+  vector-data:
+  uploads:

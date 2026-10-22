@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {primaryAction,statusCopy,progressIndex,auditLabel,successCopy} from '../frontend/src/presentation.ts';
+const user={id:1,org_id:1,username:'test',display_name:'报修人',role:'requester'};
+const order={id:1,number:'test',org_id:1,requester_id:1,category:'lighting',location:'测试位置',description:'灯不亮',status:'submitted',assignee_id:null,version:1,created_at:'',updated_at:'',requester_name:'报修人',assignee_name:''};
+assert.equal(primaryAction(user,order),'');
+assert.equal(statusCopy(user,order).owner,'后勤管理员');
+assert.equal(primaryAction(user,{...order,status:'needs_info'}),'resubmit');
+assert.equal(primaryAction(user,{...order,status:'awaiting_confirmation'}),'confirm');
+assert.equal(primaryAction({...user,role:'technician'},{...order,status:'in_progress'}),'complete');
+assert.equal(primaryAction({...user,role:'admin'},{...order,status:'assigned'}),'');
+for(const status of ['closed','rejected','cancelled']) assert.equal(primaryAction(user,{...order,status}),'');
+assert.equal(progressIndex('unassigned'),1);assert.equal(progressIndex('closed'),4);assert.equal(progressIndex('cancelled'),-1);
+assert.equal(auditLabel('work_order.reopen'),'申请重新处理');assert.equal(auditLabel('new.action'),'其他操作');
+assert.equal(successCopy('confirm'),'确认完成，工单已关闭。');assert.equal(successCopy('review','request_info'),'补充要求已记录，等待报修人完善信息。');
+console.log('PASS: role action priority, waiting responsibility, reopen/terminal progress and audit labels.');
