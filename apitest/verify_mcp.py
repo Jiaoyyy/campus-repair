@@ -51,7 +51,7 @@ requester = login('requester', 'SEED_REQUESTER_PASSWORD')
 tech = login('tech', 'SEED_TECH_PASSWORD')
 other = login('other', 'SEED_OTHER_PASSWORD')
 status, discovered, _ = call(api + '/api/mcp/tools', None, admin)
-require(status == 200 and {x['name'] for x in discovered['items']} == {'get_my_work_orders', 'get_assigned_work_orders', 'list_dispatch_candidates'}, 'SDK discovery')
+require(status == 200 and {x['name'] for x in discovered['items']} == {'get_my_work_orders', 'get_assigned_work_orders', 'list_dispatch_candidates', 'query_work_orders'}, 'SDK discovery')
 status, config, _ = call(api + '/api/agents?manage=1', None, admin)
 require(status == 200, 'agent config')
 agents = {a['role']: a for a in config['items']}
@@ -77,7 +77,7 @@ def protocol(token, role):
     status, _, _ = post({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
     require(status == 202, role + ' initialized')
     status, listing, _ = post({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
-    require(status == 200 and len(listing.get('result', {}).get('tools', [])) == 3, role + ' tools/list')
+    require(status == 200 and len(listing.get('result', {}).get('tools', [])) == 4, role + ' tools/list')
     def tool(name, args):
         return post({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': name, 'arguments': args, '_meta': {'campus_repair_auth': credential}}})
     args = {'category': 'lighting'} if role == 'admin' else {}
@@ -91,7 +91,7 @@ def protocol(token, role):
         require(status == 200 and [x['id'] for x in items] == [x['id'] for x in visible['items']], role + ' matches work-order page')
     else:
         status, visible, _ = call(api + '/api/technicians?category=lighting', None, token)
-        require(status == 200 and {x['id']: x['pending_count'] for x in items} == {x['id']: x['pending_count'] for x in visible['items']}, 'candidates match page')
+        require(status == 200 and {x['id']: x['pending_count'] + x['in_progress_count'] for x in items} == {x['id']: x['pending_count'] for x in visible['items']}, 'candidates match page')
     if role == 'requester':
         status, result, _ = tool('delete_work_order', {})
         require(status == 200 and 'error' in result, 'unknown write tool denied')

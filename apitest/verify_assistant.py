@@ -1,11 +1,12 @@
 """Role-bound RAG, citations and private streaming conversations, isolated only."""
 import argparse,json,urllib.request,urllib.error,urllib.parse,uuid,subprocess,time,concurrent.futures
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--project',default='campus-repair-check');p.add_argument('--env-file',default='tmp/check.env');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--project',default='campus-repair-check');p.add_argument('--env-file',default='tmp/check.env');p.add_argument('--state-dir',default='tmp/knowledge-mock');p.add_argument('--compose-file',action='append',default=[]);args=p.parse_args()
 if not args.project.endswith('-check'):raise SystemExit('Requires isolated *-check project')
 root=Path(__file__).resolve().parents[1];env=dict(l.split('=',1) for l in (root/args.env_file).read_text().splitlines() if '=' in l and not l.startswith('#'));base='http://127.0.0.1:'+env['WEB_PORT'];checks=0
 compose=['docker','compose','-p',args.project,'--env-file',args.env_file,'-f','compose.yaml','-f','compose.verify.yaml','-f','compose.knowledge-check.yaml']
-state=root/'tmp/knowledge-mock';state.mkdir(exist_ok=True);(state/'mode').write_text('ok');(state/'chat-mode').write_text('ok');(state/'chat-requests.jsonl').write_text('')
+compose += [value for file in args.compose_file for value in ('-f',file)]
+state=root/args.state_dir;state.mkdir(exist_ok=True);(state/'mode').write_text('ok');(state/'chat-mode').write_text('ok');(state/'chat-requests.jsonl').write_text('')
 def mode(v):dc('exec','-T','chat-mock','python','-c',"from pathlib import Path; Path('/state/chat-mode').write_text("+repr(v)+")")
 def calls():return [json.loads(l) for l in dc('exec','-T','chat-mock','cat','/state/chat-requests.jsonl').splitlines() if l]
 def dc(*cmd):
@@ -45,7 +46,7 @@ def create(agent,token=None):return expect(201,req('POST','/api/conversations',t
 def messages(c,token=None):return expect(200,req('GET',f'/api/conversations/{c}/messages',token or requester),'history')['items']
 def open_stream(c,text='照明报修需要什么信息？',token=None,mode='keyword'):
  return urllib.request.urlopen(urllib.request.Request(base+f'/api/conversations/{c}/messages',data=json.dumps({'content':text,'mode':mode}).encode(),headers={'Authorization':'Bearer '+(token or requester),'Content-Type':'application/json'},method='POST'),timeout=15)
-def event(res):
+def event(res,phases=False):
  ev='';parts=[]
  while True:
   line=res.readline()
@@ -53,7 +54,9 @@ def event(res):
   line=line.decode().rstrip('\r\n')
   if line.startswith('event:'):ev=line[6:].strip()
   if line.startswith('data:'):parts.append(line[5:].strip())
-  if not line and ev:return ev,json.loads(''.join(parts))
+  if not line and ev:
+   if ev=='phase' and not phases:ev='';parts=[];continue
+   return ev,json.loads(''.join(parts))
 def consume(res):
  events=[]
  while True:
@@ -96,35 +99,35 @@ for text in (' ', '灯'*2001):expect(400,req('POST',f'/api/conversations/{c}/mes
 mode('fake');events=turn(c);done=events[-1][1];check('[999]' not in done['answer'] and done['warning'] and len(done['citations'])==1,'invalid citation rejected');check(all('[999]' not in e[1].get('text','') for e in events),'invalid marker never streamed')
 mode('unused');done=turn(c)[-1][1];check(not done['citations'] and done['warning'],'unused candidates are not references')
 mode('unsafe');done=turn(c)[-1][1];check('第一步' not in done['answer'] and not done['citations'],'unsafe steps blocked')
-mode('ok');before=len(calls());done=turn(c,'鲸鱼星际维修时限规定')[-1][1];check('无法确认' in done['answer'] and not done['citations'] and len(calls())==before+1,'model handles unverified policy without invented citation')
+mode('ok');before=len(calls());done=turn(c,'鲸鱼星际维修时限规定')[-1][1];check('无法确认' in done['answer'] and not done['citations'] and len(calls())==before+2,'model handles unverified policy without invented citation')
 # Failed messages and inputs never enter the next completed-history context.
-mode('disconnect');check(turn(c,'照明报修失败上下文不能用')[-1][0]=='error','interruption explicit');history=messages(c);check(history[-1]['status']=='failed' and history[-1]['content'],'partial persisted')
+mode('disconnect');check(turn(c,'照明报修失败上下文不能用')[-1][0]=='error','interruption explicit');history=messages(c);check(history[-1]['status']=='failed' and not history[-1]['content'],'unverified buffered text not published')
 for m in ('fail','malformed','timeout','tools'):
  mode(m);check(turn(c)[-1][0]=='error','dependency/protocol failure '+m)
 mode('ok')
 for i in range(6):check(turn(c,'照明报修信息第'+str(i)+'轮')[-1][0]=='done','context round')
 last=calls()[-1]['messages'];check(len(last)==13,'last ten complete messages plus two systems and input');check(not any('失败上下文不能用' in m['content'] for m in last[2:]),'failed context excluded')
-# Concurrent generation is rejected; closing a client cancels and preserves safe partial text.
-mode('slow');res=open_stream(c);check(event(res)[0]=='meta','concurrent meta');check(event(res)[0]=='delta','safe partial delta');expect(409,req('POST',f'/api/conversations/{c}/messages',requester,{'content':'照明报修'}),'same conversation generation lock');res.close()
+# Concurrent generation is rejected; cancellation discards unverified buffered text.
+mode('slow');res=open_stream(c);check(event(res)[0]=='meta','concurrent meta');check(event(res,phases=True)[0]=='phase','query planning phase before verified answer');expect(409,req('POST',f'/api/conversations/{c}/messages',requester,{'content':'照明报修'}),'same conversation generation lock');res.close()
 for _ in range(40):
  h=messages(c)
  if h[-1]['status']!='generating':break
  time.sleep(.1)
-check(h[-1]['status']=='cancelled' and h[-1]['content'],'cancel persisted and lock released')
+check(h[-1]['status']=='cancelled' and not h[-1]['content'],'cancel persisted and lock released')
 # A revoked login cannot complete a round, even if the request started authenticated.
-short=login('requester','SEED_REQUESTER_PASSWORD');res=open_stream(c,token=short);event(res);event(res);expect(200,req('POST','/api/logout',short),'revoke generating identity');check(consume(res)[-1][0]=='error','revoked identity no completed claim')
+short=login('requester','SEED_REQUESTER_PASSWORD');res=open_stream(c,token=short);event(res);event(res,phases=True);expect(200,req('POST','/api/logout',short),'revoke generating identity');ev=consume(res);check(ev[-1][0]=='error','revoked identity no completed claim');check(not any(k=='delta' for k,_ in ev),'revoked identity receives no buffered answer');check(not messages(c)[-1]['content'],'revoked answer absent from history')
 # Reconfiguration during a round prevents a completed claim and future model calls.
-res=open_stream(c);event(res);event(res);configure(aid,enabled=False);ev=consume(res);check(ev[-1][0]=='error','disabled during generation');before=len(calls());expect(409,req('POST',f'/api/conversations/{c}/messages',requester,{'content':'照明报修'}),'disabled send');check(len(calls())==before,'disabled no model call');check(messages(c),'disabled retains own history');expect(404,req('GET',source_path,requester),'disabled original rejected')
+res=open_stream(c);event(res);event(res,phases=True);configure(aid,enabled=False);ev=consume(res);check(ev[-1][0]=='error','disabled during generation');check(not any(k=='delta' for k,_ in ev),'disabled assistant receives no buffered answer');check(not messages(c)[-1]['content'],'disabled answer absent from history');before=len(calls());expect(409,req('POST',f'/api/conversations/{c}/messages',requester,{'content':'照明报修'}),'disabled send');check(len(calls())==before,'disabled no model call');check(messages(c),'disabled retains own history');expect(404,req('GET',source_path,requester),'disabled original rejected')
 configure(aid,enabled=True,material_ids=[]);check(not expect(200,req('GET',f'/api/retrieval?agent_id={aid}&q='+urllib.parse.quote('照明报修'),requester),'unbind')['items'],'unbind removes search');expect(404,req('GET',source_path,requester),'unbound citation denied');h=messages(c);check(any(m['warning'] and not m['citations'] for m in h if m['role']=='assistant' and m['status']=='complete'),'history revalidates citations')
-mode('ok');general=create(aid);before=len(calls());hello=turn(general,'你好，你能做什么？')[-1][1];check('你好' in hello['answer'] and not hello['citations'] and len(calls())==before+1,'greeting reaches model without materials')
+mode('ok');general=create(aid);before=len(calls());hello=turn(general,'你好，你能做什么？')[-1][1];check('你好' in hello['answer'] and not hello['citations'] and len(calls())==before+2,'greeting reaches model without materials')
 fault=turn(general,'宿舍灯坏了')[-1][1];check('房间' in fault['answer'] and not fault['citations'],'unbound fault asks missing information')
 follow=turn(general,'三号楼201')[-1][1];check('201' in follow['answer'] and '哪栋' not in follow['answer'],'follow-up keeps provided location');check(any(m['content']=='宿舍灯坏了' for m in calls()[-1]['messages']),'model receives completed repair context')
 configure(aid,enabled=True,material_ids=[m1,m2]);mode('ok');latest=turn(c)[-1][1];cite=latest['citations'][0];path=f'/api/conversations/{c}/citations/{latest["message_id"]}/{cite["chunk_id"]}'
 # Automatic retrieval fails over visibly; unavailable evidence does not stop clarification.
-(state/'mode').write_text('fail')
+dc('exec','-T','embedding-mock','python','-c',"from pathlib import Path; Path('/state/mode').write_text('fail')")
 try:
  degraded=turn(create(aid))[-1][1];check(degraded['warning'] and degraded['citations'],'embedding failure falls back to authorized text evidence')
-finally:(state/'mode').write_text('ok')
+finally:dc('exec','-T','embedding-mock','python','-c',"from pathlib import Path; Path('/state/mode').write_text('ok')")
 dc('stop','worker');sql('RENAME TABLE knowledge_chunks TO knowledge_chunks_temporarily_unavailable')
 try:
  unavailable=turn(create(aid),'宿舍灯坏了')[-1][1];check('资料查询暂不可用' in unavailable['warning'] and not unavailable['citations'],'all search failures remain explicit while dialogue continues')
@@ -137,7 +140,7 @@ for _ in range(80):
  time.sleep(.1)
 expect(404,req('GET',path,requester),'old generation citation denied')
 # Real process crash, then simulate lease expiry rather than waiting 130 seconds.
-mode('slow');res=open_stream(c);event(res);event(res);dc('kill','-s','SIGKILL','api');res.close();dc('start','api')
+mode('slow');res=open_stream(c);event(res);event(res,phases=True);dc('kill','-s','SIGKILL','api');res.close();dc('start','api')
 for _ in range(60):
  try:
   if req('GET','/health/ready')[0]==200:break

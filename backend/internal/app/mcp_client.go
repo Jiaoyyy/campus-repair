@@ -104,7 +104,7 @@ func (s *Server) discoveredMCP(parent context.Context, r *http.Request) ([]*mcp.
 // server repeats every check; the Host check only prevents unnecessary calls.
 func (s *Server) callMCPTool(ctx context.Context, r *http.Request, agentID int64, name string, arguments any) (*mcp.CallToolResult, error) {
 	u := current(r)
-	if mcpRoles[name] == "" || mcpRoles[name] != u.Role {
+	if !mcpRoleAllowed(name, u.Role) {
 		return nil, denied()
 	}
 	h := strings.Fields(r.Header.Get("Authorization"))

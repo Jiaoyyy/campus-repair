@@ -153,16 +153,17 @@ function Audit({ onOpen }: { onOpen: (id: number) => void }) {
 function App() {
   const [u, setU] = useState<User | null>(null); const [checking, setChecking] = useState(!!sessionStorage.getItem(tokenKey)); const [message, setMessage] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false), [pendingView, setPendingView] = useState<string | null>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (!menuOpen) return; const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') { setMenuOpen(false); menuButton.current?.focus(); } }; document.addEventListener('keydown', escape); return () => document.removeEventListener('keydown', escape); }, [menuOpen]);
   const [view, setView] = useState('list'); const [selected, setSelected] = useState<number | null>(null); const [logoutError, setLogoutError] = useState(''); const [notice, setNotice] = useState(''); const [revision, setRevision] = useState(0);
   useEffect(() => { const expired = () => { setU(null); setView('list'); setSelected(null); setMessage('登录已失效，请重新登录。'); }; window.addEventListener('session-expired', expired); if (sessionStorage.getItem(tokenKey)) api<{ user: User }>('/api/me').then(v => setU(v.user)).catch(e => setMessage(e.message)).finally(() => setChecking(false)); return () => window.removeEventListener('session-expired', expired); }, []);
   async function doLogout() { try { await api('/api/logout', { method: 'POST' }); sessionStorage.removeItem(tokenKey); setU(null); setView('list'); setSelected(null); setMessage(''); setLogoutError(''); } catch (e) { setLogoutError((e as Error).message); } }
-  function logout() { if (settingsDirty) setPendingView('logout'); else void doLogout(); }
+  function logout() { if (settingsDirty || draftDirty) setPendingView('logout'); else void doLogout(); }
   if (checking) return <Loading text="正在恢复登录…" />;
   if (!u) return <Login message={message} onLogin={user => { setU(user); setMessage(''); }} />;
-  function navigate(v: string) { if (settingsDirty && view === 'agents' && v !== 'agents') { setPendingView(v); return; } setMenuOpen(false); setView(v); setSelected(null); setNotice(''); }
+  function navigate(v: string) { if ((settingsDirty && view === 'agents' && v !== 'agents') || (draftDirty && view === 'assistant' && v !== 'assistant')) { setPendingView(v); return; } setMenuOpen(false); setView(v); setSelected(null); setNotice(''); }
   function open(id: number) { setSelected(id); setView('detail'); setNotice(''); window.scrollTo(0, 0); }
   const listName = u.role === 'technician' ? '我的任务' : u.role === 'admin' ? '报修管理' : '我的报修';
   const viewNames: Record<string, string> = { list: listName, detail: '工单详情', create: '新建报修', assistant: '报修助手', agents: '助手设置', knowledge: '知识库', audit: '操作审计' };
@@ -179,9 +180,9 @@ function App() {
       {view === 'create' && <><PageHeading title="新建报修" description="填写位置与故障现象，提交后即可跟进处理。"/><CreateOrder onCancel={() => navigate('list')} onCreated={o => { setSelected(o.id); setView('detail'); setNotice('报修已提交，等待管理员审核。'); setRevision(v => v + 1); window.scrollTo(0, 0); }} /></>}
       {view === 'detail' && selected && <OrderDetail key={selected} id={selected} u={u} onBack={() => navigate('list')} notice={notice} onSaved={() => setRevision(v => v + 1)} />}
       {view === 'knowledge' && <Knowledge />}
- {view === 'assistant' && <Assistant role={u.role} onManual={() => navigate('list')} />}
+ {view === 'assistant' && <Assistant role={u.role} onManual={() => navigate('list')} onOpen={open} onDirtyChange={setDraftDirty} />}
  {view === 'agents' && u.role === 'admin' && <AgentSettings onDirtyChange={setSettingsDirty} />}
       {view === 'audit' && <Audit onOpen={open} />}
-    </main></div>{pendingView && <Drawer title="有未保存的更改" onClose={() => setPendingView(null)}><p>离开助手设置将放弃当前编辑。你可以返回保存，或放弃这些更改。</p><div className="drawer-actions"><button onClick={() => setPendingView(null)}>继续编辑</button><button className="danger" onClick={() => { const next = pendingView; setPendingView(null); if (next === 'logout') void doLogout(); else { setView(next); setSelected(null); setNotice(''); setMenuOpen(false); } }}>放弃更改并继续</button></div></Drawer>}</div>;
+    </main></div>{pendingView && <Drawer title="有未保存的更改" onClose={() => setPendingView(null)}><p>离开将放弃尚未保存的编辑。请先保存；正在生成或提交时，请等待完成后继续。</p><div className="drawer-actions"><button onClick={() => setPendingView(null)}>继续编辑</button><button className="danger" onClick={() => { const next = pendingView; setPendingView(null); setDraftDirty(false); setSettingsDirty(false); if (next === 'logout') void doLogout(); else { setView(next); setSelected(null); setNotice(''); setMenuOpen(false); } }}>放弃更改并继续</button></div></Drawer>}</div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

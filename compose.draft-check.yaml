@@ -1,0 +1,8 @@
+# Layer after compose.knowledge-check.yaml. Use only with a separate *-check project.
+services:
+  embedding-mock:
+    volumes: ["./apitest:/test:ro", "./tmp/draft-mock:/state"]
+  chat-mock:
+    volumes: ["./apitest:/test:ro", "./tmp/draft-mock:/state"]
+  mcp:
+    image: campus-repair-api:latest

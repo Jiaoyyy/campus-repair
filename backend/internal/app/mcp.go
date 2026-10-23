@@ -25,7 +25,12 @@ const (
 )
 
 var mcpRoles = map[string]string{
-	MCPMyOrders: "requester", MCPAssignedOrders: "technician", MCPDispatch: "admin",
+	MCPMyOrders: "requester", MCPAssignedOrders: "technician", MCPDispatch: "admin", MCPQueryOrders: "all",
+}
+
+func mcpRoleAllowed(name, role string) bool {
+	allowed := mcpRoles[name]
+	return allowed != "" && (allowed == role || (allowed == "all" && (role == "requester" || role == "technician" || role == "admin")))
 }
 
 var errMCPToolLimit = errors.New("MCP turn tool limit reached")
@@ -110,7 +115,7 @@ func reserveMCPCall(ctx context.Context, db *sql.DB, c mcpClaims) error {
 }
 
 func mcpAllowed(ctx context.Context, db *sql.DB, c mcpClaims, u User, name string) error {
-	if mcpRoles[name] == "" || mcpRoles[name] != u.Role {
+	if !mcpRoleAllowed(name, u.Role) {
 		return errors.New("tool is not allowed for this role")
 	}
 	var exists int
@@ -124,17 +129,56 @@ func mcpAllowed(ctx context.Context, db *sql.DB, c mcpClaims, u User, name strin
 
 func validMCPArguments(raw json.RawMessage, name string) bool {
 	if len(raw) == 0 || string(raw) == "null" {
-		return name != MCPDispatch
+		return name != MCPDispatch && name != MCPQueryOrders
 	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+	fields := map[string]string{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
 		return false
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return false
+		}
+		if _, exists := fields[key]; exists {
+			return false
+		}
+		var value any
+		if decoder.Decode(&value) != nil {
+			return false
+		}
+		text, ok := value.(string)
+		if !ok {
+			return false
+		}
+		fields[key] = text
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return false
+	}
+	if _, err = decoder.Token(); err != io.EOF {
+		return false
+	}
+	if name == MCPQueryOrders {
+		for key := range fields {
+			if key != "queue" && key != "status" && key != "category" && key != "number" && key != "period" && key != "location" && key != "keyword" && key != "date_from" && key != "date_to" {
+				return false
+			}
+		}
+		var q OrderQuery
+		return json.Unmarshal(raw, &q) == nil && q.valid()
 	}
 	if name != MCPDispatch {
 		return len(fields) == 0
 	}
 	_, hasCategory := fields["category"]
-	return hasCategory && len(fields) == 1
+	return hasCategory && len(fields) == 1 && categoryOK(fields["category"])
 }
 
 type mcpCategoryInput struct {
@@ -226,7 +270,23 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 		}
 		var output map[string]any
 		if err == nil {
-			output, err = mcpQuery(ctx, db, u, name, category)
+			if name == MCPQueryOrders {
+				var q OrderQuery
+				err = json.Unmarshal(req.Params.Arguments, &q)
+				if err == nil {
+					var result BusinessResult
+					result, err = queryBusinessOrders(ctx, db, u, q)
+					if err == nil {
+						var raw []byte
+						raw, err = json.Marshal(result)
+						if err == nil {
+							err = json.Unmarshal(raw, &output)
+						}
+					}
+				}
+			} else {
+				output, err = mcpQuery(ctx, db, u, name, category)
+			}
 			if err != nil {
 				outcome = "failed"
 			}
@@ -238,6 +298,12 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 			outcome = "failed"
 		}
 		meta := map[string]any{"tool": name, "duration_ms": time.Since(started).Milliseconds()}
+		if name == MCPQueryOrders && validMCPArguments(req.Params.Arguments, name) {
+			var q OrderQuery
+			if json.Unmarshal(req.Params.Arguments, &q) == nil {
+				meta["query"] = q
+			}
+		}
 		if category != "" {
 			meta["category"] = category
 		}
@@ -267,6 +333,9 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: MCPDispatch, Description: "管理员查看指定类别的可派维修人员及负载"}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpCategoryInput) (*mcp.CallToolResult, map[string]any, error) {
 		return tool(ctx, req, MCPDispatch, in.Category)
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: MCPQueryOrders, Description: "按当前登录角色查询授权工单全量数量、状态类别及最近5条，可筛选今天或完整编号"}, func(ctx context.Context, req *mcp.CallToolRequest, _ OrderQuery) (*mcp.CallToolResult, map[string]any, error) {
+		return tool(ctx, req, MCPQueryOrders, "")
 	})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{JSONResponse: true, SessionTimeout: time.Minute})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

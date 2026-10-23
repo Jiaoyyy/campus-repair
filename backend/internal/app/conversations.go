@@ -18,14 +18,16 @@ type Conversation struct {
 	Updated   time.Time `json:"updated_at"`
 }
 type Message struct {
-	ID        int64         `json:"id"`
-	Role      string        `json:"role"`
-	Content   string        `json:"content"`
-	Status    string        `json:"status"`
-	Warning   string        `json:"warning"`
-	Citations []Citation    `json:"citations"`
-	Created   time.Time     `json:"created_at"`
-	Refs      []CitationRef `json:"-"`
+	ID        int64           `json:"id"`
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	Status    string          `json:"status"`
+	Warning   string          `json:"warning"`
+	Citations []Citation      `json:"citations"`
+	Created   time.Time       `json:"created_at"`
+	Refs      []CitationRef   `json:"-"`
+	Draft     *RepairDraft    `json:"draft,omitempty"`
+	Business  *BusinessResult `json:"business,omitempty"`
 }
 
 func (s *Server) ownConversation(ctx context.Context, u User, id int64) (Conversation, error) {
@@ -186,6 +188,16 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	for i := range items {
 		m := &items[i]
 		if m.Role == "assistant" && m.Status == "complete" {
+			m.Business, err = s.businessHistory(r.Context(), u, id, m.ID)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
+			m.Draft, err = s.messageDraft(r.Context(), id, m.ID)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
 			content, citations, warning, e := s.verifyReferences(r.Context(), u, c.AgentID, m.Content, m.Refs)
 			if e != nil {
 				s.fail(w, r, e)
@@ -241,6 +253,8 @@ type Turn struct {
 	SessionHash               string
 	Agent                     Agent
 	History                   []chatMessage
+	Draft                     *Input
+	Business                  *BusinessResult
 }
 
 func (s *Server) beginTurn(ctx context.Context, u User, c Conversation, input string, request string) (Turn, error) {
@@ -366,6 +380,30 @@ func (s *Server) finishTurn(t Turn, u User, status, text, warning, request strin
 			if err != nil {
 				return &Problem{409, "citation_changed", "材料来源已变化，请重新提问"}
 			}
+		}
+	}
+	if status == "complete" && t.Business != nil {
+		raw, e := json.Marshal(t.Business)
+		if e != nil {
+			return e
+		}
+		if _, e = tx.ExecContext(ctx, "INSERT INTO assistant_business_results(message_id,result) VALUES(?,?)", t.MessageID, string(raw)); e != nil {
+			return e
+		}
+	}
+	if status == "complete" && t.Draft != nil {
+		if u.Role != "requester" {
+			return denied()
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE repair_drafts SET status='superseded',version=version+1 WHERE conversation_id=? AND status='active'", t.ConversationID)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, "INSERT INTO repair_drafts(message_id,conversation_id,category,location,description,idem_key) VALUES(?,?,?,?,?,?)", t.MessageID, t.ConversationID, t.Draft.Category, t.Draft.Location, t.Draft.Description, randomHex(24))
+		}
+		if err == nil {
+			err = writeAudit(ctx, tx, request, &u, "draft.generate", t.MessageID, "success", map[string]any{"conversation_id": t.ConversationID})
+		}
+		if err != nil {
+			return err
 		}
 	}
 	raw, _ := json.Marshal(refs)

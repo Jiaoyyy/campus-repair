@@ -5,7 +5,7 @@ import { Drawer, Empty, Icon, Loading, PageHeading } from './ui';
 
 type Material = { id: number; title: string; demo: boolean; generation: number };
 type MCPTool = { name: string; role: string; description: string };
-const toolTitles: Record<string, string> = { get_my_work_orders: '查询本人工单', get_assigned_work_orders: '查询分配给我的任务', list_dispatch_candidates: '查询可派维修人员' };
+const toolTitles: Record<string, string> = { get_my_work_orders: '查询本人工单', get_assigned_work_orders: '查询分配给我的任务', list_dispatch_candidates: '查询可派维修人员', query_work_orders: '查询授权工单与待办数量' };
 function fingerprint(a?: Agent | null) { return a ? JSON.stringify([a.name, a.role, a.prompt || '', a.enabled, [...a.material_ids].sort((x,y) => x-y), [...(a.tool_names || [])].sort()]) : ''; }
 function clone(a: Agent): Agent { return { ...a, material_ids: [...a.material_ids], tool_names: [...(a.tool_names || [])] }; }
 
@@ -39,7 +39,7 @@ export function AgentSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolea
   try { const v = await api<{ agent: Agent }>(`/api/agents/${editing.id}`, { method: 'PUT', body: JSON.stringify(editing) }); setAgents(items => items.map(a => a.id === v.agent.id ? v.agent : a)); setEditing(clone(v.agent)); setNotice('配置已保存，下次提问按新配置执行。'); }
   catch (e) { setError((e as Error).message); } finally { setBusy(false); }
  }
- const available = tools.filter(t => t.role === editing?.role), filtered = materials.filter(m => m.title.toLowerCase().includes(query.toLowerCase().trim()));
+ const available = tools.filter(t => t.role === editing?.role || t.role === 'all'), filtered = materials.filter(m => m.title.toLowerCase().includes(query.toLowerCase().trim()));
  return <><PageHeading title="助手设置" description="配置各角色助手的资料范围与查询能力。"><button disabled={busy || loading} onClick={() => change('refresh')}><Icon kind="refresh"/>刷新配置</button></PageHeading>
  {error && <div className="error" role="alert">{error}</div>}{notice && <div className="success" role="status"><Icon kind="check"/>{notice}</div>}
  {loading ? <Loading text="正在读取助手配置…"/> : <div className="agent-settings"><aside className="panel agent-options"><h2>角色助手</h2>{agents.map(a => <button key={a.id} disabled={busy} aria-pressed={editing?.id === a.id} className={`agent-option ${editing?.id === a.id ? 'selected' : ''}`} onClick={() => { if (a.id !== editing?.id) change(a); }}><span className="agent-option-top"><strong>{a.name}</strong><span className={`status-dot ${a.enabled ? 'enabled' : ''}`}/></span><span>{roleNames[a.role as keyof typeof roleNames]} · {a.enabled ? '已启用' : '已停用'}</span><small>{a.material_ids.length} 份材料 · {(a.tool_names || []).length} 项查询</small></button>)}</aside>

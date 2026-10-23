@@ -299,3 +299,29 @@ summary { cursor: pointer; }
 .savebar-error{flex-basis:100%;color:var(--danger);font-size:13px;margin-bottom:2px}
 
 .more-menu summary::-webkit-details-marker,.knowledge-search summary::-webkit-details-marker{display:none}
+
+/* Conversation repair cards share the normal form controls. */
+.repair-draft { margin-top:16px; padding:20px; border:1px solid var(--border); border-radius:12px; background:var(--surface, #fff); max-width:620px; }
+.repair-draft h3 { margin:0; font-size:16px; }
+.repair-draft fieldset { border:0; padding:0; margin:0; min-width:0; }
+.repair-draft label { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+.repair-draft input,.repair-draft textarea,.repair-draft select { width:100%; min-width:0; }
+.draft-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:16px; }
+.draft-resolved p { overflow-wrap:anywhere; }
+@media(max-width:600px) { .repair-draft { padding:14px; } .draft-actions .primary { width:100%; } }
+
+/* A complete draft needs enough room to review before submitting. */
+.chat-panel:has(.repair-draft) { height:max(820px,calc(100dvh - 232px)); max-height:1000px; }
+@media(max-width:600px) { .chat-panel:has(.repair-draft) { height:850px; } }
+
+.repair-draft label input,.repair-draft label select,.repair-draft label textarea { margin-top:0; }
+
+.business-result{margin-top:16px;padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface);max-width:650px}
+.business-result h3{margin:0;font-size:16px}.business-total{display:flex;gap:8px;align-items:baseline;margin:12px 0}.business-total strong{font-size:32px;color:var(--brand)}.business-total span{font-size:13px;color:var(--muted)}
+.business-statuses,.business-followups{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.business-statuses span{font-size:12px;background:var(--bg);padding:4px 8px;border-radius:6px}.business-followups button{font-size:12px;min-height:32px;padding:4px 10px}
+.business-orders{display:grid;gap:8px}.business-order{width:100%;justify-content:space-between;gap:12px;padding:12px;text-align:left}.business-order>span:first-child{display:grid;gap:5px;min-width:0}.business-order strong,.business-order small{overflow-wrap:anywhere}.business-order small{font-size:11px;color:var(--muted)}
+.candidate-result{padding:12px 0;border-top:1px solid var(--border)}.candidate-result>div{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.candidate-result small{display:block;margin-top:8px;color:var(--muted)}
+.chat-panel:has(.business-result){height:max(780px,calc(100dvh - 232px));max-height:1100px}.retry-answer{margin-top:8px}
+@media(max-width:600px){.business-result{padding:14px}.business-order{align-items:flex-start;flex-direction:column}.chat-panel:has(.business-result){height:900px}}
+
+.answer-recovery{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-top:8px}

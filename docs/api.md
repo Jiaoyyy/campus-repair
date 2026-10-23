@@ -1,6 +1,6 @@
 # 已实现接口
 
-接口已实现登录、人工工单、材料管理、带引用的角色资料问答及内部只读 MCP 查询。三项技能和模型原生工具调用尚未实现；能力接口按服务配置返回实际状态。
+接口已实现登录、人工工单、材料管理、带引用的角色资料问答及内部只读 MCP 查询。已实现原生只读工具决策；完整三项技能和通用多步工具循环尚未实现；能力接口按服务配置返回实际状态。
 
 ## 通用规则
 
@@ -107,3 +107,45 @@ SSE 事件：meta（会话/消息/请求/配置版本、skill=none、可选 tool
 配置、恢复、超时与当前边界见 [助手说明](assistant.md)。
 
 对话接口为兼容旧客户端仍接收合法的 mode 字符串，但不采用该值选择检索算法；新客户端只发送 content。问候不检索；报修相关问题自动使用授权资料，无材料/无命中仍调用模型。混合查询失败可回退关键词并在 done.warning 明确降级，全部检索不可用也可继续追问但不能核实制度事实。管理 GET /api/retrieval 的显式 mode 与 503 契约保持。
+
+## 对话式报修草稿（2026-10-23）
+
+仅报修人明确请求“帮我报修”等操作时进入结构化整理；有效草稿存在时可多轮补充。普通问答、制度问题、问候及 MCP 查询继续按原规则处理。本轮仍为 `skill=none`，不表示三项可配置技能已完成。
+
+SSE `done` 及消息历史的完整助手消息新增可选 `draft`：
+
+```json
+{"message_id": 2, "conversation_id": 1, "category": "lighting", "location": "三号楼201", "description": "灯不亮", "version": 1, "status": "active", "idempotency_key": "<服务端随机生成>"}
+```
+
+类别/位置/描述可暂为空；位置最多200个Unicode字符、描述最多2000个字符。模型结构严格校验，位置/描述须来自本人用户输入或保存过的字段，泛称“宿舍”仍视为缺少具体位置。非法输出、取消生成或失败不发布新卡片；新卡片将同会话旧有效草稿标为 `superseded`。
+
+- `GET /api/conversations/{id}/drafts/{message}`：读取本人草稿；历史 `GET .../messages` 同样返回草稿。报修人以外角色403，他人/跨组织404。
+- `PUT /api/conversations/{id}/drafts/{message}`：body `{category, location, description, version, status}`，status仅 `active`（保存）或 `cancelled`（取消）；返回 `{draft}`。实际修改才递增version并换幂等键，同版本同内容保存保持原键。旧版本、生成中、取消/被替代/已提交409；助手停用不可编辑。
+- `POST /api/work-orders`：原人工提交保持兼容。卡片确认时在原三字段body增加 `draft_message_id`、`draft_version`，`Idempotency-Key`须为草稿返回的键。字段须与已保存内容一致且满足原有必填校验。服务端从登录身份校验报修人、组织与会话归属，不采用客户端自报身份。
+
+草稿提交与工单/事件/幂等/审计使用同一事务；首次201，重放200，返回原有 `{order, replayed}`。submitted草稿增加 `order_id`、`order_number`；即使幂等记录过期，仍返回关联原工单。失败整体回滚；取消草稿不等于取消工单。草稿生成、修改/取消、确认分别有 `draft.generate`、`draft.update`、`draft.submit` 元数据审计，不记录完整私有内容。没有向模型或 MCP 增加业务写入口。
+
+## 多场景业务查询（2026-10-23）
+
+新增只读 MCP 工具 `query_work_orders`，三角色均可绑定，但结果仍分别限定本人报修、当前指派任务、本组织工单。参数仅 `{queue, status, category, number, period, location, keyword, date_from, date_to}`：queue为all/action/active/finished，status为现有状态码，category为三类故障，number为完整工单号，period为all/today/recent/yesterday/this_week/last_week/this_month；location/keyword为最多200字的字面子串，date_from/date_to为含起止日最多366天的北京时间日期，不能与相对period混用。不接受用户、组织、角色、任意SQL或写动作。默认种子助手通过一次性迁移6绑定；管理员解绑后重启不恢复，自定义助手仍需发现后绑定。
+
+数量基于完整授权匹配集，列表最多5条。`action`复用页面口径：报修人待补充/待确认，维修人员待接单/处理中，管理员待审核/待派单。今天按Asia/Shanghai自然日换算UTC：报修人/管理员按创建时间，维修人员按当前指派最近一次assign/reassign事件。模型决策支持上周等相对日期及明确日期范围，返回实际起止日期；原有无模型关键词降级仍限今天或不限日期。
+
+SSE在meta之后可发送兼容可忽略的 `phase` 事件，data为 `{message}`，提示授权查询、资料核对或草稿整理阶段；原delta/done/error终止规则不变。`done`及完整助手历史消息新增可选 `business`：
+
+```json
+{"kind":"orders","query":{"queue":"action","period":"all"},"total":8,"statuses":{"submitted":5,"unassigned":3},"items":[{"id":1,"number":"RP...","status":"submitted","category":"lighting","location":"演示楼201","description":"虚构演示：灯不亮"}],"queried_at":"2026-10-23T01:00:00Z","historical":false}
+```
+
+`items`这里只示意一条；实际最多5条。人员查询返回kind=candidates，附带候选的ID、显示名、类别及pending_count/in_progress_count，按两者总量排序给只读建议。工单正文和业务事件不被修改。
+
+结果快照关联本人消息持久化，历史返回historical=true；工单卡片再次检查当前可见性，改派后原维修人员的旧卡片不再包含无权工单。总量/状态计数仍表示查询时快照，详情打开走原授权接口。最新消息只有为成功业务查询时，短筛选追问才继承该语境；问候/资料问答不继承。无模型配置仍可执行已绑定业务查询及有效追问；MCP故障或解绑明确失败，不让模型猜数量。工具审计保留白名单筛选参数和耗时，不保存原始提问。
+
+注意旧 `/api/technicians` 的 `pending_count` 是待接单与处理中总负载；MCP候选的 `pending_count` 专指待接单，另有 `in_progress_count`。两者核对时应使用MCP两项之和。
+
+配置模型时先通过原生tool_calls生成只读查询计划，meta.tool为兼容旧客户端保留的初步意图提示，不作为实际调用证据；查询done另含实际tool，业务成功以business与MCP审计为准。语义计划非法返回query_plan_failed，执行失败返回tool_unavailable，均不发布business。普通模型正文完整缓冲并检查后才输出delta，未通过的缓冲内容不写为可见部分回答；phase及唯一done/error规则保持。新增参数的精确口径见 [MCP说明](mcp.md)。
+
+查询计划阶段网关HTTP错误分为query_rate_limited（429）、query_quota_exhausted（明确额度不足）、query_gateway_unavailable；非法模型计划仍为query_plan_failed。各错误均不发布business，不自动重试；错误正文/私有提示词不写日志，诊断仅含固定阶段码、状态码及额度分类。
+
+稳定化契约：回答正文delta仅在完成事务最终校验成功后发布，失败partial不含未核验缓冲。done已保存而客户端断开时，应读取历史确认状态，不能自动重问。SSE客户端严格核对本轮conversation_id/message_id与字段类型，支持跨字节CRLF/UTF-8分片；失败仍保留输入供编辑。只读工具的null/非字符串/重复键参数被拒绝。
