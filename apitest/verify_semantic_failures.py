@@ -32,8 +32,12 @@ def configure(tools):
     global agent
     agent=req('PUT',f"/api/agents/{agent['id']}",admin,{**agent,'tool_names':tools})['agent']
 def conversation():return req('POST','/api/conversations',admin,{'agent_id':agent['id']})['conversation']['id']
-def successes():return {x['request_id'] for x in req('GET','/api/audit?page_size=100',admin)['items'] if x['action']=='mcp.call' and x['outcome']=='success'}
+def mcp_requests():return {x['request_id'] for x in req('GET','/api/audit?page_size=100',admin)['items'] if x['action']=='mcp.call'}
 original=list(agent['tool_names'])
+mode_path=root/'tmp/draft-mock/chat-mode'
+original_mode=mode_path.read_bytes() if mode_path.exists() else None
+request_log=root/'tmp/draft-mock/chat-requests.jsonl'
+def request_count():return len(request_log.read_text().splitlines()) if request_log.exists() else 0
 try:
     configure(['query_work_orders','list_dispatch_candidates'])
     req('POST','/api/work-orders',requester,{'category':'lighting','location':'研发楼语义故障测试','description':'虚构验收灯不亮'})
@@ -41,10 +45,16 @@ try:
     mode('plan-location');cid=conversation();events=turn(cid,'研发楼最近有什么故障');done=events[-1][1]
     check(events[-1][0]=='done' and done['business']['query']['location']=='研发楼','合法原生计划确实调用查询')
     snapshot=done['business']
-    for value in ['plan-identity','plan-write','tools','malformed','fail','rate-limit','quota-limit']:
-        mode(value);events=turn(cid,'研发楼最近有什么故障');check(events[-1][0]=='error' and 'business' not in events[-1][1],value+' 不发布查询结果')
-        check(events[0][1]['request_id'] not in successes(),value+' 未产生成功MCP调用')
+    for value in ['plan-identity','plan-write','tools','malformed','fail','rate-limit','quota-limit','plan-disconnect','plan-timeout']:
+        mode(value);count_before=request_count();events=turn(cid,'研发楼最近有什么故障');check(events[-1][0]=='error' and 'business' not in events[-1][1],value+' 不发布查询结果')
+        check(events[0][1]['request_id'] not in mcp_requests(),value+' 未产生MCP调用')
         if value in ('rate-limit','quota-limit'):check(events[-1][1]['code']==('query_rate_limited' if value=='rate-limit' else 'query_quota_exhausted'),'429 与额度不足提示准确')
+        if value in ('plan-disconnect','plan-timeout'):
+            check(events[-1][1]['code']=='query_gateway_unavailable' and ('超时' if value=='plan-timeout' else '无法连接') in events[-1][1]['message'],value+' 正确区分连接与超时')
+            check(request_count()==count_before+1,value+' 仅请求一次不自动重试')
+            check(not any(k=='delta' for k,_ in events),value+' 不发布未核验正文')
+        elif value in ('plan-identity','plan-write','tools','malformed'):
+            check(events[-1][1]['code']=='query_plan_failed',value+' 仍按非法计划拒绝')
         history=req('GET',f'/api/conversations/{cid}/messages',admin)['items']
         check(history[-1]['status']=='failed' and not history[-1].get('business'),value+' 失败历史不保存新快照')
     mode('false-business');events=turn(conversation(),'聊聊研发楼')
@@ -54,6 +64,8 @@ try:
     check(events[-1][0]=='error' and events[-1][1]['code']=='tool_unavailable','解绑工具不能绕过MCP查询')
     check(before==req('GET','/api/work-orders/summary',admin),'所有计划失败和只读调用不改变业务计数')
 finally:
-    configure(original);mode('ok')
+    configure(original)
+    if original_mode is None:mode_path.unlink(missing_ok=True)
+    else:mode_path.write_bytes(original_mode)
 (root/'tmp/semantic-failures.json').write_text(json.dumps({'result':'passed','checks':checks},ensure_ascii=False,indent=2)+'\n')
 print(f'通过 {len(checks)} 项语义失败检查')

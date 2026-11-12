@@ -3,10 +3,15 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,6 +100,60 @@ func TestSemanticQueryDatesAndLiteralSearch(t *testing.T) {
 	}
 }
 
+func TestGroundQueryTimeScope(t *testing.T) {
+	previous := &BusinessResult{Kind: "orders", Query: OrderQuery{Location: "研发楼一楼", Period: "recent"}}
+	for _, tt := range []struct {
+		input    string
+		previous *BusinessResult
+		period   string
+	}{
+		{"研发楼有什么问题", nil, "all"},
+		{"研发楼一楼怎么了", nil, "all"},
+		{"3号楼有什么问题", nil, "all"},
+		{"研发楼最近有什么故障", nil, "recent"},
+		{"研发楼有什么问题", previous, "all"},
+		{"那研发楼有哪些问题", previous, "recent"},
+		{"只看漏水", previous, "recent"},
+		{"不限日期的未结束工单", previous, "all"},
+	} {
+		q := groundQueryDates(OrderQuery{Location: "研发楼", Period: "recent", Keyword: "问题"}, tt.input, tt.previous)
+		if q.Period != tt.period || q.Keyword != "" {
+			t.Fatalf("%s => %+v", tt.input, q)
+		}
+	}
+	q := groundQueryDates(OrderQuery{Location: "研发楼", DateFrom: "2026-10-01", DateTo: "2026-10-07"}, "研发楼有什么问题", nil)
+	if q.Period != "all" || q.DateFrom != "" || q.DateTo != "" {
+		t.Fatal("invented dates retained")
+	}
+	previous.Query = OrderQuery{DateFrom: "2026-10-01", DateTo: "2026-10-07"}
+	q = groundQueryDates(OrderQuery{Period: "recent"}, "那照明的呢", previous)
+	if q.DateFrom != previous.Query.DateFrom || q.DateTo != previous.Query.DateTo || q.Period != "" {
+		t.Fatal("followup changed actual date range")
+	}
+	q = groundQueryDates(OrderQuery{Keyword: "问题", Period: "today"}, "查今天故障描述包含问题的工单", nil)
+	if q.Keyword != "问题" || q.Period != "today" {
+		t.Fatal("explicit literal keyword/date lost")
+	}
+	for _, input := range []string{"研发楼10/21有什么故障", "研发楼二十一号有什么故障", "研发楼过去三天有什么故障", "研发楼近3天有什么故障", "研发楼周一有什么故障"} {
+		q := groundQueryDates(OrderQuery{DateFrom: "2026-10-21", DateTo: "2026-10-21"}, input, nil)
+		if q.DateFrom != "2026-10-21" || q.DateTo != "2026-10-21" {
+			t.Fatalf("explicit date expression cleared: %s", input)
+		}
+	}
+}
+
+func TestDateLimitedEmptyResultExplainsScope(t *testing.T) {
+	b := BusinessResult{Kind: "orders", Query: OrderQuery{Location: "研发楼", Period: "recent"}, TimeBasis: "创建时间（北京时间）：2026-10-22 至 2026-10-28"}
+	text := formatBusinessResult("admin", b)
+	if !strings.Contains(text, b.TimeBasis) || !strings.Contains(text, "时间范围外仍可能有未结束工单") {
+		t.Fatal("recent empty result hid old unresolved orders")
+	}
+	b.Query.Period, b.TimeBasis = "all", ""
+	if !strings.Contains(formatBusinessResult("admin", b), "不限日期") {
+		t.Fatal("undated scope not displayed")
+	}
+}
+
 func TestUnverifiedBusinessGuard(t *testing.T) {
 	for _, text := range []string{"目前没有查询到研发楼近期的故障报修记录。", "本组织工单共有3单。", "未查到维修记录。", "研发楼有3单。", "已经派单给师傅。"} {
 		if !unverifiedBusinessAnswer(text) {
@@ -122,5 +181,71 @@ func TestQueryGatewayFailures(t *testing.T) {
 			t.Fatal("gateway failure misclassified or leaked")
 		}
 		server.Close()
+	}
+}
+
+func TestQueryGatewayTransportFailures(t *testing.T) {
+	for _, mode := range []string{"refused", "tls", "headers-timeout", "stream-timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls atomic.Int32
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				io.Copy(io.Discard, r.Body)
+				if mode == "stream-timeout" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{}}]}\n\n")
+					w.(http.Flusher).Flush()
+				}
+				<-r.Context().Done()
+			})
+			var server *httptest.Server
+			if mode == "tls" {
+				server = httptest.NewUnstartedServer(handler)
+				server.Config.ErrorLog = log.New(io.Discard, "", 0)
+				server.StartTLS()
+			} else {
+				server = httptest.NewServer(handler)
+			}
+			defer server.Close()
+			if mode == "refused" {
+				server.Close()
+			}
+			g := ChatGateway{URL: server.URL + "/private-path", Key: "private-fixture-key", Model: "fixture", Timeout: 100 * time.Millisecond}
+			_, err := g.planQuery(context.Background(), "admin", nil, "fixture", nil, nil)
+			var failure *queryGatewayError
+			if !errors.As(err, &failure) || !errors.Is(err, errChat) {
+				t.Fatalf("transport error was classified as plan validation: %v", err)
+			}
+			want := "connection"
+			if strings.HasSuffix(mode, "timeout") {
+				want = "timeout"
+			}
+			if failure.Transport != want || failure.Status != 0 || failure.Quota {
+				t.Fatalf("wrong classification: %+v", failure)
+			}
+			if strings.Contains(err.Error(), server.URL) || strings.Contains(err.Error(), "private") {
+				t.Fatal("transport diagnostic leaked private URL or credential")
+			}
+			wantCalls := int32(0)
+			if strings.HasSuffix(mode, "timeout") {
+				wantCalls = 1
+			}
+			if calls.Load() != wantCalls {
+				t.Fatalf("unexpected request count/retry: %d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestQueryTransportDiagnosticRedaction(t *testing.T) {
+	for _, err := range []error{
+		&net.DNSError{Err: "private DNS diagnostic", Name: "private-gateway.invalid"},
+		&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("private connection diagnostic")},
+		context.DeadlineExceeded,
+	} {
+		failure := queryTransportFailure(err)
+		if strings.Contains(failure.Error(), "private") || failure.Status != 0 {
+			t.Fatal("raw network diagnostic was retained")
+		}
 	}
 }

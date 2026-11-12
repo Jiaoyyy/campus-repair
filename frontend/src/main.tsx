@@ -1,3 +1,7 @@
+import { Select } from './Select';
+import { useNavigation } from './useNavigation';
+import { homeView } from './navigation';
+import type { View } from './navigation';
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, APIError, tokenKey, statusNames, categoryNames, roleNames, actionNames, time } from './api';
@@ -5,6 +9,10 @@ import type { User, Order, Detail, Page } from './api';
 import { primaryAction, statusCopy, progressSteps, progressIndex, queueNames, auditLabel, successCopy } from './presentation';
 import type { Queue, Summary } from './presentation';
 import './style.css';
+import './design.css';
+import {VisitPanel} from './VisitPanel';
+import type {VisitContext} from './VisitPanel';
+import {RepairWorkbench} from './RepairWorkbench';
 import { Knowledge } from './Knowledge';
 import { Assistant } from './Assistant';
 import { AgentSettings } from './AgentSettings';
@@ -30,9 +38,12 @@ function Login({ onLogin, message }: { onLogin: (u: User) => void; message: stri
       <button className="primary full" disabled={busy}>{busy ? '正在登录…' : '登录'}</button><p className="login-note">账号由平台管理员提供。</p></form></section></div>;
 }
 
-function CreateOrder({ onCreated, onCancel }: { onCreated: (o: Order) => void; onCancel: () => void }) {
+function CreateOrder({ onCreated, onCancel, onDirtyChange }: { onCreated: (o: Order) => void; onCancel: () => void; onDirtyChange: (dirty:boolean) => void }) {
   const [input, setInput] = useState({ category: 'lighting', location: '', description: '' }); const key = useRef(crypto.randomUUID());
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const dirty = !!(input.location || input.description || input.category !== 'lighting');
+  useEffect(() => { onDirtyChange(dirty || busy); return () => onDirtyChange(false); }, [dirty, busy, onDirtyChange]);
+  useEffect(() => { if (!dirty && !busy) return; const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn); }, [dirty,busy]);
   function update(k: string, v: string) { setInput(i => ({ ...i, [k]: v })); key.current = crypto.randomUUID(); }
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setBusy(true); setError('');
@@ -54,12 +65,15 @@ function actionsFor(u: User, o: Order) {
   if (u.role === 'requester') { if (o.status === 'needs_info') a.push('resubmit'); if (o.status === 'awaiting_confirmation') a.push('confirm', 'reopen'); if (['submitted', 'needs_info', 'unassigned', 'assigned'].includes(o.status)) a.push('cancel'); }
   return a;
 }
-function ActionForm({ u, o, disabled, onDone, onConflict }: { u: User; o: Order; disabled: boolean; onDone: (message: string) => void; onConflict: () => void }) {
-  const mainAction = primaryAction(u, o); const available = actionsFor(u, o);
+function ActionForm({ u, o, disabled, onDone, onConflict, visitBlocked, onDirtyChange }: { onDirtyChange:(dirty:boolean)=>void; u: User; o: Order; disabled: boolean; onDone: (message: string) => void; onConflict: () => void; visitBlocked: boolean }) {
+  const mainAction = visitBlocked && o.status === 'in_progress' && u.role === 'technician' ? 'records' : primaryAction(u, o); const available = actionsFor(u, o).filter(a => !visitBlocked || a !== 'complete');
   const [action, setAction] = useState(mainAction); const [decision, setDecision] = useState('approve'); const [reason, setReason] = useState('');
   const [measures, setMeasures] = useState(''); const [result, setResult] = useState(''); const [tech, setTech] = useState('');
   const [techs, setTechs] = useState<{ id: number; display_name: string; pending_count: number }[]>([]); const [staffLoading, setStaffLoading] = useState(false);
   const [input, setInput] = useState({ category: o.category, location: o.location, description: o.description }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const dirty = !!(reason || measures || result || tech || decision !== 'approve' || input.category !== o.category || input.location !== o.location || input.description !== o.description);
+  useEffect(() => { onDirtyChange(dirty || busy); return () => onDirtyChange(false); }, [dirty,busy,onDirtyChange]);
+  useEffect(() => { if(!dirty&&!busy)return;const warn=(e:BeforeUnloadEvent)=>{e.preventDefault();e.returnValue='';};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn); },[dirty,busy]);
   useEffect(() => {
     let active = true;
     if (action === 'assign' || action === 'reassign') { setStaffLoading(true); api<{ items: typeof techs }>(`/api/technicians?category=${o.category}`).then(v => { if (active) setTechs(v.items.filter(t => action !== 'reassign' || t.id !== o.assignee_id)); }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setStaffLoading(false); }); }
@@ -74,23 +88,34 @@ function ActionForm({ u, o, disabled, onDone, onConflict }: { u: User; o: Order;
     catch (e) { setError((e as Error).message); if (e instanceof APIError && e.status === 409) onConflict(); } finally { setBusy(false); }
   }
   const buttonName = action === 'review' ? { approve: '审核通过', request_info: '要求补充信息', reject: '确认驳回' }[decision] : actionNames[action];
-  return <section className={`panel action-panel ${!action ? 'secondary-only' : ''}`} aria-label="工单操作">
-    <div className="action-options">{available.filter(a => a !== mainAction).map(a => a === action ? <span key={a} className="selected-tag">{actionNames[a]}</span> : <button type="button" key={a} className={a === 'cancel' ? 'danger-link' : ''} disabled={busy || disabled} onClick={() => choose(a)}>{a === 'cancel' ? '需要取消报修？' : a === 'reassign' ? '调整维修人员' : actionNames[a]}</button>)}</div>
-    {action && <form onSubmit={submit}><h3>{actionNames[action]}</h3><ErrorMessage text={error} /><fieldset disabled={busy || disabled}>
+  const form = action ? <form onSubmit={submit}><h3>{actionNames[action]}</h3><ErrorMessage text={error} /><fieldset disabled={busy || disabled}>
       {action === 'review' && <div className="review-options" role="group" aria-label="审核决定">{[['approve', '通过'], ['request_info', '要求补充'], ['reject', '驳回']].map(([k, v]) => <button key={k} type="button" aria-pressed={decision === k} className={decision === k ? 'selected' : ''} onClick={() => { setDecision(k); setReason(''); }}>{v}</button>)}</div>}
-      {(action === 'assign' || action === 'reassign') && <><label>维修人员<select aria-label="维修人员" value={tech} onChange={e => setTech(e.target.value)} required disabled={staffLoading}><option value="">{staffLoading ? '正在读取人员…' : techs.length ? '请选择维修人员' : '暂无匹配的可派人员'}</option>{techs.map(t => <option key={t.id} value={t.id}>{t.display_name} · 待处理 {t.pending_count} 单</option>)}</select></label><p className="field-help">仅显示负责{categoryNames[o.category]}、当前可用的维修人员。</p></>}
+      {(action === 'assign' || action === 'reassign') && <><label>维修人员<Select aria-label="维修人员" value={tech} onChange={e => setTech(e.target.value)} required disabled={staffLoading}><option value="">{staffLoading ? '正在读取人员…' : techs.length ? '请选择维修人员' : '暂无匹配的可派人员'}</option>{techs.map(t => <option key={t.id} value={t.id}>{t.display_name} · 待处理 {t.pending_count} 单</option>)}</Select></label><p className="field-help">仅显示负责{categoryNames[o.category]}、当前可用的维修人员。</p></>}
       {needsReason && <label>{action === 'review' && decision === 'request_info' ? '需补充的信息' : action === 'reopen' ? '仍未解决的问题' : action === 'cancel' ? '取消原因' : '原因说明'}<textarea required value={reason} onChange={e => setReason(e.target.value)} maxLength={2000} rows={3} /></label>}
       {['records', 'complete'].includes(action) && <><label>处理措施<textarea required value={measures} onChange={e => setMeasures(e.target.value)} rows={3} maxLength={2000} placeholder="说明已经完成的检查或维修。" /></label><label>处理结果<textarea required value={result} onChange={e => setResult(e.target.value)} rows={3} maxLength={2000} placeholder={action === 'complete' ? '说明维修后的情况，供报修人确认。' : '说明当前进展和仍需处理的问题。'} /></label></>}
-      {action === 'resubmit' && <><label>类别<select aria-label="故障类别" value={input.category} onChange={e => setInput({ ...input, category: e.target.value })}>{Object.entries(categoryNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label><label>位置<input required value={input.location} onChange={e => setInput({ ...input, location: e.target.value })} maxLength={200} /></label><label>故障描述<textarea required value={input.description} onChange={e => setInput({ ...input, description: e.target.value })} maxLength={2000} rows={4} /></label></>}
+      {action === 'resubmit' && <><label>类别<Select aria-label="故障类别" value={input.category} onChange={e => setInput({ ...input, category: e.target.value })}>{Object.entries(categoryNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></label><label>位置<input required value={input.location} onChange={e => setInput({ ...input, location: e.target.value })} maxLength={200} /></label><label>故障描述<textarea required value={input.description} onChange={e => setInput({ ...input, description: e.target.value })} maxLength={2000} rows={4} /></label></>}
       {action === 'confirm' && <p className="confirmation-note">请先检查故障是否已解决。确认后工单将关闭。</p>}
       {action === 'cancel' && <p className="confirmation-note">取消后本次工单结束。如仍需维修，需要重新提交报修。</p>}
       <button className={`full ${action === 'cancel' || (action === 'review' && decision === 'reject') ? 'danger' : 'primary'}`} disabled={staffLoading || busy || disabled || ((action === 'assign' || action === 'reassign') && !tech)}>{busy ? '正在保存…' : buttonName}</button>
-      {action !== mainAction && <button type="button" className="text-button full" onClick={() => choose(mainAction)}>返回{mainAction ? '主要操作' : '查看进度'}</button>}
-    </fieldset></form>}
+      {action !== mainAction && <button type="button" className="text-button full" onClick={() => choose(mainAction)}>{mainAction ? '返回主要操作' : '收起编辑'}</button>}
+    </fieldset></form> : null;
+  if (!mainAction) return <div className={`compact-order-actions ${action ? 'editing' : ''}`} aria-label="工单次要操作">
+    {!action && available.map(a => <button key={a} type="button" className={`text-button ${a === 'cancel' ? 'danger-link' : ''}`} disabled={busy || disabled} onClick={() => choose(a)}>{a === 'reassign' ? '调整维修人员' : actionNames[a]}</button>)}
+    {form}
+  </div>;
+  return <section className="panel action-panel" aria-label="工单操作">
+    {form}
+
+    {available.some(a => a !== mainAction) && <details className="secondary-actions"><summary>其他操作</summary><div className="action-options">{available.filter(a => a !== mainAction).map(a => a === action ? <span key={a} className="selected-tag">{actionNames[a]}</span> : <button type="button" key={a} className={a === 'cancel' ? 'danger-link' : ''} disabled={busy || disabled} onClick={() => choose(a)}>{a === 'cancel' ? '需要取消报修？' : a === 'reassign' ? '调整维修人员' : actionNames[a]}</button>)}</div></details>}
   </section>;
 }
 
-function OrderDetail({ id, u, onBack, notice, onSaved }: { id: number; u: User; onBack: () => void; notice: string; onSaved: () => void }) {
+function OrderDetail({ id, u, onBack, notice, onSaved, onDirtyChange, section }: { section?:'visit'; id: number; u: User; onBack: () => void; notice: string; onSaved: () => void; onDirtyChange: (v: boolean) => void }) {
+  const visitTarget=useRef<HTMLDivElement>(null), visitFocused=useRef(false);
+  const [visitContext, setVisitContext] = useState<VisitContext | null>(null);
+  const [actionDirty,setActionDirty]=useState(false),[visitDirty,setVisitDirty]=useState(false);
+  useEffect(()=>{onDirtyChange(actionDirty||visitDirty);return()=>onDirtyChange(false);},[actionDirty,visitDirty,onDirtyChange]);
+  const visitBlocked = visitContext === null ? null : !!visitContext.exception;
   const [detail, setDetail] = useState<Detail | null>(null); const [error, setError] = useState(''); const [refresh, setRefresh] = useState(0);
   const [loading, setLoading] = useState(true); const [stale, setStale] = useState(false); const [message, setMessage] = useState(notice);
   useEffect(() => {
@@ -98,27 +123,36 @@ function OrderDetail({ id, u, onBack, notice, onSaved }: { id: number; u: User; 
     api<Detail>(`/api/work-orders/${id}`).then(v => { if (active) { setDetail(v); setError(''); setStale(false); } }).catch(e => { if (active) { setError(e.message); setStale(true); if (e instanceof APIError && [401, 403, 404].includes(e.status)) setDetail(null); } }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [id, refresh]);
-  const o = detail?.order; const copy = o ? statusCopy(u, o) : null; const lastEvent = detail?.events.at(-1); const lastRecord = detail?.records.at(-1);
+  useEffect(()=>{if(section!=='visit'||!detail||loading||visitFocused.current)return;visitFocused.current=true;const frame=requestAnimationFrame(()=>{visitTarget.current?.focus({preventScroll:true});visitTarget.current?.scrollIntoView({block:'start',behavior:'instant'});});return()=>cancelAnimationFrame(frame);},[section,detail,loading]);
+  const o = detail?.order; const copy = o ? (o.status === 'in_progress' && visitBlocked ? {title:'上门安排需要跟进',description:'请查看下方异常和下一步安排，处理进展会保留在时间线。',owner:visitContext?.exception === 'no_show' && visitContext.needs_availability ? (o.requester_name || '报修人') : o.assignee_name || '维修人员'} : statusCopy(u, o)) : null; const lastEvent = detail?.events.at(-1); const lastRecord = detail?.records.at(-1);
+  const actionForm = o && actionsFor(u,o).length > 0 ? <ActionForm key={`${id}-${o.version}`} u={u} o={o} onDirtyChange={setActionDirty} visitBlocked={!!visitBlocked} disabled={loading || stale || visitBlocked === null} onConflict={() => setStale(true)} onDone={msg => { setMessage(msg); setRefresh(v => v + 1); onSaved(); }} /> : null;
   const rank = o ? progressIndex(o.status) : -1;
-  return <><div className="detail-toolbar"><button className="back-button" onClick={onBack}>← 返回工单列表</button><button onClick={() => setRefresh(v => v + 1)} disabled={loading}>刷新进度</button></div>
+  return <><div className="detail-toolbar"><button className="back-button" onClick={onBack}>← 返回</button><button onClick={() => setRefresh(v => v + 1)} disabled={loading}>刷新进度</button></div>
     <ErrorMessage text={error} />{stale && detail && <div className="error" role="alert">当前仅显示上次读取的信息，请刷新后再操作。</div>}
     {message && <div className="success" role="status"><Icon kind="check" />{message}</div>}
     {!detail ? loading ? <Loading /> : <div className="panel empty"><h3>暂时无法读取工单</h3><p>请重试，或返回列表查看可访问的工单。</p><button onClick={() => setRefresh(v => v + 1)}>重新读取</button></div> : o && copy && <>
       <div className="detail-title"><div><span className="order-reference">工单 {o.number}</span><h1>{o.location}</h1><p className="muted">{categoryNames[o.category]} · {o.requester_name}提交 · {time(o.created_at)}</p></div><Badge status={o.status} /></div>
       <section className={`status-summary ${['closed', 'cancelled', 'rejected'].includes(o.status) ? 'terminal' : ''}`} aria-label="当前处理状态"><div className="status-icon"><Icon kind={o.status === 'closed' ? 'check' : 'box'} /></div><div><h2>{copy.title}</h2><p>{copy.description}</p>{['needs_info', 'rejected', 'cancelled'].includes(o.status) && lastEvent?.note && <div className="status-reason"><strong>{o.status === 'needs_info' ? '补充要求' : o.status === 'rejected' ? '驳回原因' : '取消原因'}：</strong>{lastEvent.note}</div>}</div><div className="responsible"><span>当前处理方</span><strong>{copy.owner}</strong></div></section>
       {rank >= 0 && <ol className="progress-track" aria-label="处理流程">{progressSteps.map((label, i) => <li key={label} className={i < rank ? 'done' : i === rank ? 'current' : ''} aria-current={i === rank ? 'step' : undefined}><span>{i < rank ? <Icon kind="check" /> : i + 1}</span><strong>{label}</strong></li>)}</ol>}
-      <div className={`detail-grid ${actionsFor(u, o).length ? '' : 'no-actions'}`}><div className="detail-content">
+      <div className={`detail-work ${primaryAction(u,o) ? '' : 'read-only'}`}>
+        <section className="panel report-information"><h2 className="section-title">故障与报修信息</h2><p className="detail-description">{o.description}</p>{lastRecord && <div className="result-preview"><strong>最新维修结果</strong><p>{lastRecord.result}</p></div>}<details className="order-metadata"><summary>查看报修人与处理信息</summary><div className="info-grid"><div><span>故障类别</span><strong>{categoryNames[o.category]}</strong></div><div><span>报修人</span><strong>{o.requester_name}</strong></div><div><span>维修人员</span><strong>{o.assignee_name || (['cancelled', 'rejected'].includes(o.status) ? '未安排' : '等待安排')}</strong></div><div><span>最近更新</span><strong>{time(o.updated_at)}</strong></div><div><span>提交时间</span><strong>{time(o.created_at)}</strong></div></div></details>{!primaryAction(u,o) && actionForm}</section>
+{primaryAction(u,o) && <div className="detail-actions">{actionForm}</div>}
+      </div>
+      <div ref={visitTarget} className="visit-target" tabIndex={-1} aria-label="工单上门记录"><VisitPanel o={o} u={u} onContextChange={setVisitContext} disabled={loading || stale} onSaved={() => {setRefresh(v => v + 1); onSaved();}} onDirtyChange={setVisitDirty} /></div>
+      <div className="detail-grid no-actions"><div className="detail-content">
         {lastRecord && <section className="panel latest-result"><div className="section-heading"><h2>{o.status === 'awaiting_confirmation' || o.status === 'closed' ? '最近维修结果' : '最近处理记录'}</h2><span>{time(lastRecord.created_at)}</span></div><p className="result-text">{lastRecord.result}</p><dl><dt>处理措施</dt><dd>{lastRecord.measures}</dd><dt>处理人员</dt><dd>{lastRecord.actor_name}</dd></dl>{(detail.records.length > 1) && <details className="past-records"><summary>查看此前 {detail.records.length - 1} 次处理记录</summary>{detail.records.slice(0, -1).reverse().map(r => <div className="repair-record" key={r.id}><p className="muted small">{r.actor_name} · {time(r.created_at)}</p><p>措施：{r.measures}</p><p>结果：{r.result}</p></div>)}</details>}</section>}
-        <section className="panel report-information"><h2 className="section-title">报修信息</h2><div className="info-grid"><div><span>故障类别</span><strong>{categoryNames[o.category]}</strong></div><div><span>报修人</span><strong>{o.requester_name}</strong></div><div><span>维修人员</span><strong>{o.assignee_name || (['cancelled', 'rejected'].includes(o.status) ? '未安排' : '等待安排')}</strong></div><div><span>最近更新</span><strong>{time(o.updated_at)}</strong></div></div><div className="description">{o.description}</div></section>
+
         <section className="panel order-history"><div className="section-heading"><h2>处理时间线</h2><span>{detail.events.length} 条记录</span></div><ol className="timeline">{[...detail.events].reverse().map((e, i) => <li key={e.id} className={i === 0 ? 'latest' : ''}><span className="dot" /><div><div className="event-heading"><strong>{actionNames[e.action] || '工单操作'}</strong><time>{time(e.created_at)}</time></div><p>{e.actor_name} · {statusNames[e.to_status]}</p>{e.note && <div className="event-note">{e.note}</div>}</div></li>)}</ol></section>
-      </div>{actionsFor(u, o).length > 0 && <aside className="detail-actions"><ActionForm key={`${id}-${o.version}`} u={u} o={o} disabled={loading || stale} onConflict={() => setStale(true)} onDone={msg => { setMessage(msg); setRefresh(v => v + 1); onSaved(); }} /><div className="detail-tip"><strong>进度与记录会持续保留</strong><p>工单变更会显示在处理时间线。刷新可查看最新进展。</p></div></aside>}</div>
+      </div></div>
     </>}
   </>;
 }
 
 function OrderList({ u, active, revision, onOpen, onNew }: { u: User; active: boolean; revision: number; onOpen: (id: number) => void; onNew: () => void }) {
   const [data, setData] = useState<Page | null>(null); const [summary, setSummary] = useState<Summary | null>(null); const [error, setError] = useState('');
-  const [queue, setQueue] = useState<Queue>('all'); const [status, setStatus] = useState(''); const [category, setCategory] = useState('');
+  const todoTitle=useRef<HTMLHeadingElement>(null);const [todoJump,setTodoJump]=useState(0),[todoFeedback,setTodoFeedback]=useState('');
+  useEffect(()=>{if(!todoJump)return;const frame=requestAnimationFrame(()=>{todoTitle.current?.focus({preventScroll:true});todoTitle.current?.scrollIntoView({block:'start',behavior:'instant'});});return()=>cancelAnimationFrame(frame);},[todoJump]);
+  const [queue, setQueue] = useState<Queue>(u.role === 'requester' ? 'all' : 'action'); const [status, setStatus] = useState(''); const [category, setCategory] = useState('');
   const [location, setLocation] = useState(''); const [search, setSearch] = useState(''); const [page, setPage] = useState(1); const [reload, setReload] = useState(0); const [loading, setLoading] = useState(true);
   useEffect(() => {
     if (!active) return; let live = true; setLoading(true); setError('');
@@ -127,16 +161,18 @@ function OrderList({ u, active, revision, onOpen, onNew }: { u: User; active: bo
     return () => { live = false; };
   }, [active, page, queue, status, category, search, reload, revision]);
   const filtered = !!(status || category || search);
-  function choose(q: Queue) { setQueue(q); setStatus(''); setPage(1); }
+  function choose(q: Queue) { setTodoFeedback(''); setQueue(q); setStatus(''); setPage(1); }
+  function showTodo(){setTodoFeedback(queue==='action'&&!filtered&&page===1?'当前已是待办列表，已定位到工单区域。':'已定位到待办列表，并清除位置、类别和状态筛选。');setQueue('action');setStatus('');setCategory('');setLocation('');setSearch('');setPage(1);setTodoJump(v=>v+1);}
   function clear() { setStatus(''); setCategory(''); setLocation(''); setSearch(''); setPage(1); }
   const title = u.role === 'requester' ? '我的报修' : u.role === 'technician' ? '维修任务' : '报修管理';
-  const summaryHint = u.role === 'requester' ? '需要补充或确认的工单' : u.role === 'technician' ? '需要接单或处理的任务' : '需要审核或派单的工单';
   return <><PageHeading title={title} description={u.role === 'requester' ? '提交故障，跟进维修，确认处理结果。' : u.role === 'technician' ? '查看分配给你的任务，记录处理进展。' : '审核报修信息，安排维修，跟进处理结果。'}>{u.role === 'requester' && <button className="primary" onClick={onNew}><Icon kind="plus"/>新建报修</button>}</PageHeading>
-    <div className="overview" aria-label="工单概览">{(['all', 'action', 'active', 'finished'] as Queue[]).map(q => <button className={`overview-card ${q === 'action' ? 'attention' : ''} ${queue === q ? 'chosen' : ''}`} key={q} onClick={() => choose(q)} aria-pressed={queue === q}><span>{queueNames[q]}</span><strong>{summary ? summary[q === 'all' ? 'total' : q] : '—'}</strong><small>{q === 'action' ? summaryHint : q === 'all' ? '当前可查看的全部工单' : q === 'active' ? '包括等待及正在处理' : '已关闭、驳回或取消'}</small></button>)}</div>
-    <section className="panel list-panel"><div className="list-title"><div className="queue-tabs" role="group" aria-label="工单队列">{(['all', 'action', 'active', 'finished'] as Queue[]).map(q => <button className={queue === q ? 'active' : ''} aria-pressed={queue === q} key={q} onClick={() => choose(q)}>{queueNames[q]}</button>)}</div><button onClick={() => setReload(x => x + 1)} disabled={loading}>刷新</button></div>
-      <form className="filters" onSubmit={e => { e.preventDefault(); setPage(1); setSearch(location.trim()); }}><input aria-label="按位置查找" value={location} onChange={e => setLocation(e.target.value)} placeholder="搜索楼栋、房间或位置" maxLength={200} /><select aria-label="按类别筛选" value={category} onChange={e => { setCategory(e.target.value); setPage(1); }}><option value="">全部类别</option>{Object.entries(categoryNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select><select aria-label="按状态筛选" value={status} onChange={e => { setStatus(e.target.value); setPage(1); }}><option value="">全部状态</option>{Object.entries(statusNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select><button>查找</button>{filtered && <button type="button" className="text-button" onClick={clear}>清除筛选</button>}</form>
-      {loading ? <Loading /> : error ? <div className="empty error-state"><h3>工单暂时无法读取</h3><ErrorMessage text={error} /><button onClick={() => setReload(x => x + 1)}>重新读取</button></div> : data?.items.length ? <>
-        <div className="table-scroll desktop-orders"><table><thead><tr><th>位置与报修信息</th><th>状态 / 下一步</th><th>维修人员</th><th>最近更新</th><th /></tr></thead><tbody>{data.items.map(o => <tr key={o.id}><td><button className="order-link" onClick={() => onOpen(o.id)}>{o.location}</button><p className="order-excerpt">{o.description}</p><span className="order-number">{categoryNames[o.category]} · {o.number}</span></td><td><Badge status={o.status} /><span className="next-owner">{primaryAction(u, o) ? actionNames[primaryAction(u, o)] : ['closed', 'rejected', 'cancelled'].includes(o.status) ? '流程已结束' : `等待${statusCopy(u, o).owner}`}</span></td><td>{o.assignee_name || '待安排'}</td><td className="muted nowrap">{time(o.updated_at)}</td><td><button className="row-action" aria-label={`查看 ${o.number}`} onClick={() => onOpen(o.id)}>查看<Icon kind="arrow" /></button></td></tr>)}</tbody></table></div>
+    <section className="work-priority"><div><span className="eyebrow">当前待办</span><h2>{summary ? `有 ${summary.action} 单需要你处理` : '正在读取待办…'}</h2></div><button className="primary" onClick={showTodo}>定位待办列表<Icon kind="arrow"/></button></section>
+    <div className="overview" aria-label="工单概览">{(['all', 'action', 'active', 'finished'] as Queue[]).map(q => <button className={`overview-card ${q === 'action' ? 'attention' : ''} ${queue === q ? 'chosen' : ''}`} key={q} onClick={() => choose(q)} aria-pressed={queue === q}><span>{queueNames[q]}</span><strong>{summary ? summary[q === 'all' ? 'total' : q] : '—'}</strong></button>)}</div>
+    <section className="panel list-panel" aria-busy={loading}><div className="list-title"><h2 ref={todoTitle} tabIndex={-1} className="list-section-title">{queueNames[queue]}<span className="count">{data && !loading ? data.total : '—'}</span></h2><button onClick={() => setReload(x => x + 1)} disabled={loading}>{loading ? '正在读取…' : '刷新'}</button></div>
+      {todoFeedback&&<p className="todo-feedback" role="status" key={todoJump}>{todoFeedback}</p>}
+      <form className="filters" onSubmit={e => { e.preventDefault(); setPage(1); setSearch(location.trim()); }}><input aria-label="按位置查找" value={location} onChange={e => setLocation(e.target.value)} placeholder="搜索楼栋、房间或位置" maxLength={200} /><Select aria-label="按类别筛选" value={category} onChange={e => { setCategory(e.target.value); setPage(1); }}><option value="">全部类别</option>{Object.entries(categoryNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select><Select aria-label="按状态筛选" value={status} onChange={e => { setStatus(e.target.value); setPage(1); }}><option value="">全部状态</option>{Object.entries(statusNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select><button>查找</button>{filtered && <button type="button" className="text-button" onClick={clear}>清除筛选</button>}</form>
+      {loading && !data ? <Loading /> : error ? <div className="empty error-state"><h3>工单暂时无法读取</h3><ErrorMessage text={error} /><button onClick={() => setReload(x => x + 1)}>重新读取</button></div> : data?.items.length ? <>
+        <div className="table-scroll desktop-orders"><table><thead><tr><th>位置与报修信息</th><th>状态</th><th>维修人员</th><th>最近更新</th><th /></tr></thead><tbody>{data.items.map(o => <tr key={o.id}><td><button className="order-link" onClick={() => onOpen(o.id)}>{o.location}</button><p className="order-excerpt">{o.description}</p><span className="order-number">{categoryNames[o.category]} · {o.number}</span></td><td><Badge status={o.status} /></td><td>{o.assignee_name || '待安排'}</td><td className="muted nowrap">{time(o.updated_at)}</td><td><button className="row-action" aria-label={`查看 ${o.number}`} onClick={() => onOpen(o.id)}>{primaryAction(u,o) ? actionNames[primaryAction(u,o)] : '查看进度'}<Icon kind="arrow" /></button></td></tr>)}</tbody></table></div>
         <div className="mobile-orders">{data.items.map(o => <button className="order-card" key={o.id} onClick={() => onOpen(o.id)} aria-label={`查看 ${o.number}`}><div><strong>{o.location}</strong><Badge status={o.status} /></div><p>{o.description}</p><span>{categoryNames[o.category]} · {o.assignee_name || '等待安排维修人员'}</span><footer><span>{time(o.updated_at)}</span><strong>{primaryAction(u, o) ? actionNames[primaryAction(u, o)] : '查看进度'} →</strong></footer></button>)}</div>
       </> : <div className="empty"><span className="empty-icon"><Icon kind={queue === 'action' ? 'check' : 'box'} /></span><h3>{filtered ? '没有匹配的工单' : queue === 'action' ? '暂无需要你处理的事项' : queue === 'finished' ? '暂无已结束工单' : queue === 'active' ? '暂无未结束工单' : '还没有工单'}</h3><p>{filtered ? '换个位置关键词，或清除筛选条件。' : queue === 'action' ? '其他工单的进度可在“全部工单”查看。' : queue === 'all' && u.role === 'requester' ? '遇到设施问题时，提交报修并在这里跟进。' : '符合条件的工单会在这里显示。'}</p>{filtered ? <button onClick={clear}>清除筛选</button> : queue !== 'all' ? <button onClick={() => choose('all')}>查看全部工单</button> : u.role === 'requester' ? <button onClick={onNew}>提交第一份报修</button> : null}</div>}
       {!loading && !error && data && data.total > 0 && <div className="pagination"><span>筛选结果 {data.total} 单 · 第 {page} / {Math.ceil(data.total / 20)} 页</span><div><button disabled={page === 1} onClick={() => setPage(p => p - 1)}>上一页</button><button disabled={page * 20 >= data.total} onClick={() => setPage(p => p + 1)}>下一页</button></div></div>}
@@ -151,38 +187,64 @@ function Audit({ onOpen }: { onOpen: (id: number) => void }) {
 }
 
 function App() {
-  const [u, setU] = useState<User | null>(null); const [checking, setChecking] = useState(!!sessionStorage.getItem(tokenKey)); const [message, setMessage] = useState('');
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [draftDirty, setDraftDirty] = useState(false);
-  const [settingsDirty, setSettingsDirty] = useState(false), [pendingView, setPendingView] = useState<string | null>(null);
-  const menuButton = useRef<HTMLButtonElement>(null);
-  useEffect(() => { if (!menuOpen) return; const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') { setMenuOpen(false); menuButton.current?.focus(); } }; document.addEventListener('keydown', escape); return () => document.removeEventListener('keydown', escape); }, [menuOpen]);
-  const [view, setView] = useState('list'); const [selected, setSelected] = useState<number | null>(null); const [logoutError, setLogoutError] = useState(''); const [notice, setNotice] = useState(''); const [revision, setRevision] = useState(0);
-  useEffect(() => { const expired = () => { setU(null); setView('list'); setSelected(null); setMessage('登录已失效，请重新登录。'); }; window.addEventListener('session-expired', expired); if (sessionStorage.getItem(tokenKey)) api<{ user: User }>('/api/me').then(v => setU(v.user)).catch(e => setMessage(e.message)).finally(() => setChecking(false)); return () => window.removeEventListener('session-expired', expired); }, []);
-  async function doLogout() { try { await api('/api/logout', { method: 'POST' }); sessionStorage.removeItem(tokenKey); setU(null); setView('list'); setSelected(null); setMessage(''); setLogoutError(''); } catch (e) { setLogoutError((e as Error).message); } }
-  function logout() { if (settingsDirty || draftDirty) setPendingView('logout'); else void doLogout(); }
-  if (checking) return <Loading text="正在恢复登录…" />;
-  if (!u) return <Login message={message} onLogin={user => { setU(user); setMessage(''); }} />;
-  function navigate(v: string) { if ((settingsDirty && view === 'agents' && v !== 'agents') || (draftDirty && view === 'assistant' && v !== 'assistant')) { setPendingView(v); return; } setMenuOpen(false); setView(v); setSelected(null); setNotice(''); }
-  function open(id: number) { setSelected(id); setView('detail'); setNotice(''); window.scrollTo(0, 0); }
-  const listName = u.role === 'technician' ? '我的任务' : u.role === 'admin' ? '报修管理' : '我的报修';
-  const viewNames: Record<string, string> = { list: listName, detail: '工单详情', create: '新建报修', assistant: '报修助手', agents: '助手设置', knowledge: '知识库', audit: '操作审计' };
-  const navItem = (key: string, label: string, icon: string) => <button className={view === key || (key === 'list' && view === 'detail') ? 'active' : ''} aria-current={view === key || (key === 'list' && view === 'detail') ? 'page' : undefined} onClick={() => navigate(key)}><Icon kind={icon}/><span>{label}</span></button>;
-  return <div className="app-shell">
-    {menuOpen && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMenuOpen(false)}/>}
-    <aside className={`sidebar ${menuOpen ? 'mobile-open' : ''}`} id="main-navigation"><div className="brand"><span className="brand-icon"><Icon kind="tool" /></span><div>校园报修<small>校园设施服务平台</small></div></div>
-      <p className="sidebar-label">工作台</p><nav aria-label="业务导航">{navItem('list', listName, 'orders')}{u.role === 'requester' && navItem('create', '新建报修', 'plus')}{navItem('assistant', '报修助手', 'chat')}</nav>
-      {u.role === 'admin' && <><p className="sidebar-label">管理</p><nav aria-label="管理导航">{navItem('knowledge', '知识库', 'book')}{navItem('agents', '助手设置', 'settings')}{navItem('audit', '操作审计', 'audit')}</nav></>}
+  const [u, setU] = useState<User | null>(null), [checking, setChecking] = useState(!!sessionStorage.getItem(tokenKey)), [message, setMessage] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false), [draftDirty,setDraftDirty]=useState(false), [visitDirty,setVisitDirty]=useState(false), [settingsDirty,setSettingsDirty]=useState(false), [createDirty,setCreateDirty]=useState(false);
+  const navigation=useNavigation(u?.role || null, draftDirty || visitDirty || settingsDirty || createDirty);
+  const {view,id:selected,from,section}=navigation.route;
+  const [assistantDiscard,setAssistantDiscard]=useState(0);
+  const [visited,setVisited]=useState<Set<View>>(new Set(['list']));
+  const [logoutError,setLogoutError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0);
+  const menuButton=useRef<HTMLButtonElement>(null), menuPanel=useRef<HTMLElement>(null);
+  const content=useRef<HTMLElement>(null);
+  useEffect(()=>{setVisited(v=>v.has(view)?v:new Set([...v,view]));setMenuOpen(false);document.title=`${view==='detail'?'工单详情':view==='assistant'?'报修助手':'工作台'} · 校园报修`;},[view,selected]);
+  useEffect(()=>{
+    if(!menuOpen)return;
+    const overflow=document.body.style.overflow; document.body.style.overflow='hidden';
+    menuPanel.current?.querySelector<HTMLElement>('[data-nav-close]')?.focus();
+    const keys=(e:KeyboardEvent)=>{
+      if(e.key==='Escape'){e.preventDefault();setMenuOpen(false);}
+      if(e.key!=='Tab')return;
+      const nodes=[...(menuPanel.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],[tabindex="0"]')||[])].filter(n=>n.getClientRects().length>0);
+      const first=nodes[0],last=nodes.at(-1);
+      if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
+      if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
+    };
+    const desktop=window.matchMedia('(min-width:801px)'),resize=()=>{if(desktop.matches)setMenuOpen(false);};
+    document.addEventListener('keydown',keys);desktop.addEventListener('change',resize);
+    return()=>{document.removeEventListener('keydown',keys);desktop.removeEventListener('change',resize);document.body.style.overflow=overflow;if(desktop.matches)content.current?.focus({preventScroll:true});else menuButton.current?.focus({preventScroll:true});};
+  },[menuOpen]);
+  useEffect(()=>{const expired=()=>{setU(null);setMessage('登录已失效，请重新登录。');};window.addEventListener('session-expired',expired);if(sessionStorage.getItem(tokenKey))api<{user:User}>('/api/me').then(v=>setU(v.user)).catch(e=>setMessage(e.message)).finally(()=>setChecking(false));return()=>window.removeEventListener('session-expired',expired);},[]);
+  // Use the visual viewport so the composer also fits above an on-screen keyboard.
+  useEffect(()=>{const update=()=>document.documentElement.style.setProperty('--app-height',`${window.visualViewport?.height || window.innerHeight}px`);update();window.visualViewport?.addEventListener('resize',update);window.addEventListener('resize',update);return()=>{window.visualViewport?.removeEventListener('resize',update);window.removeEventListener('resize',update);};},[]);
+  function clearDirty(){setDraftDirty(false);setVisitDirty(false);setSettingsDirty(false);setCreateDirty(false);}
+  async function doLogout(){try{await api('/api/logout',{method:'POST'});sessionStorage.removeItem(tokenKey);history.replaceState(null,'','#/login');setU(null);setVisited(new Set(['list']));clearDirty();setMessage('');setLogoutError('');}catch(e){setLogoutError((e as Error).message);}}
+  function navigate(v:View){setMenuOpen(false);setNotice('');navigation.navigate({view:v});}
+  function open(id:number,section?:'visit'){setNotice('');navigation.navigate({view:'detail',id,section,from:view==='detail'?from:view});}
+  if(checking)return <Loading text="正在恢复登录…"/>;
+  if(!u)return <Login message={message} onLogin={user=>{clearDirty();setU(user);setVisited(new Set(['list']));setMessage('');}}/>;
+  const listName=u.role==='technician'?'我的任务':u.role==='admin'?'报修管理':'我的报修';
+  const viewNames:Record<View,string>={list:listName,detail:'工单详情',create:'新建报修',assistant:'报修助手',agents:'助手设置',knowledge:'知识库',audit:'操作审计',workbench:u.role==='admin'?'上门异常':'维修工作台'};
+  const parent=view==='detail'?(from || homeView(u.role)):view==='create'?'list':homeView(u.role);
+  const sectionView=view==='detail'?parent:view;
+  const activeView=u.role==='admin'&&sectionView==='workbench'?'list':sectionView;
+  const navItem=(key:View,label:string,icon:string)=><button className={activeView===key?'active':''} aria-current={activeView===key?'page':undefined} onClick={()=>navigate(key)}><Icon kind={icon}/><span>{label}</span></button>;
+  return <div className={`app-shell ${view==='assistant'?'assistant-mode':''}`} key={u.id}>
+    <a className="skip-link" href="#main-content" onClick={e=>{e.preventDefault();content.current?.focus();}}>跳到主要内容</a>
+    {menuOpen&&<button className="nav-backdrop" aria-label="关闭导航" onClick={()=>setMenuOpen(false)}/>}
+    <aside ref={menuPanel} className={`sidebar ${menuOpen?'mobile-open':''}`} id="main-navigation" aria-label="主导航"><button className="nav-close" data-nav-close aria-label="关闭导航菜单" onClick={()=>setMenuOpen(false)}><Icon kind="close"/>关闭菜单</button><div className="brand"><span className="brand-icon"><Icon kind="tool"/></span><div>校园报修<small>校园设施服务平台</small></div></div>
+      <p className="sidebar-label">日常工作</p><nav aria-label="业务导航">{u.role==='technician'&&navItem('workbench','维修工作台','tool')}{navItem('list',listName,'orders')}{u.role==='requester'&&navItem('create','新建报修','plus')}{navItem('assistant','报修助手','chat')}</nav>
+      {u.role==='admin'&&<><p className="sidebar-label">平台管理</p><nav aria-label="管理导航">{navItem('knowledge','知识库','book')}{navItem('agents','助手设置','settings')}{navItem('audit','操作审计','audit')}</nav></>}
       <div className="sidebar-bottom"><span className="avatar">{u.display_name.slice(0,1)}</span><div><strong>{u.display_name}</strong><span>{roleNames[u.role]}</span></div></div>
     </aside>
-    <div className="workspace" inert={menuOpen}><header className="app-header"><div className="header-location"><button ref={menuButton} className="icon-button mobile-menu" aria-label="打开导航" aria-controls="main-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(v => !v)}><Icon kind="menu"/></button><div className="header-path"><span>工作台</span><Icon kind="arrow"/><strong>{viewNames[view]}</strong></div></div><div className="account"><span className="role-label">{roleNames[u.role]}</span><span>{u.display_name}</span><button className="icon-button" onClick={logout} aria-label="退出登录"><Icon kind="logout" /></button></div></header><main><ErrorMessage text={logoutError} />
-      <div hidden={view !== 'list'}><OrderList u={u} active={view === 'list'} revision={revision} onOpen={open} onNew={() => navigate('create')} /></div>
-      {view === 'create' && <><PageHeading title="新建报修" description="填写位置与故障现象，提交后即可跟进处理。"/><CreateOrder onCancel={() => navigate('list')} onCreated={o => { setSelected(o.id); setView('detail'); setNotice('报修已提交，等待管理员审核。'); setRevision(v => v + 1); window.scrollTo(0, 0); }} /></>}
-      {view === 'detail' && selected && <OrderDetail key={selected} id={selected} u={u} onBack={() => navigate('list')} notice={notice} onSaved={() => setRevision(v => v + 1)} />}
-      {view === 'knowledge' && <Knowledge />}
- {view === 'assistant' && <Assistant role={u.role} onManual={() => navigate('list')} onOpen={open} onDirtyChange={setDraftDirty} />}
- {view === 'agents' && u.role === 'admin' && <AgentSettings onDirtyChange={setSettingsDirty} />}
-      {view === 'audit' && <Audit onOpen={open} />}
-    </main></div>{pendingView && <Drawer title="有未保存的更改" onClose={() => setPendingView(null)}><p>离开将放弃尚未保存的编辑。请先保存；正在生成或提交时，请等待完成后继续。</p><div className="drawer-actions"><button onClick={() => setPendingView(null)}>继续编辑</button><button className="danger" onClick={() => { const next = pendingView; setPendingView(null); setDraftDirty(false); setSettingsDirty(false); if (next === 'logout') void doLogout(); else { setView(next); setSelected(null); setNotice(''); setMenuOpen(false); } }}>放弃更改并继续</button></div></Drawer>}</div>;
+    <div className="workspace" inert={menuOpen}><header className="app-header"><div className="header-location"><button ref={menuButton} className="icon-button mobile-menu" aria-label="打开导航" aria-controls="main-navigation" aria-expanded={menuOpen} onClick={()=>setMenuOpen(v=>!v)}><Icon kind="menu"/></button><nav className="header-path" aria-label="当前位置"><button onClick={()=>navigate(homeView(u.role))}>工作台</button><Icon kind="arrow"/>{(view==='detail'||view==='create')&&<><button onClick={()=>navigate(parent)}>{viewNames[parent]}</button><Icon kind="arrow"/></>}{u.role==='admin'&&view==='workbench'&&<><button onClick={()=>navigate('list')}>报修管理</button><Icon kind="arrow"/></>}<strong aria-current="page">{viewNames[view]}</strong></nav></div><div className="account"><span>{u.display_name}</span><button className="logout-button" onClick={()=>navigation.guard(()=>void doLogout())} aria-label="退出登录"><Icon kind="logout"/><span>退出</span></button></div></header><main id="main-content" tabIndex={-1} ref={content}><ErrorMessage text={logoutError}/>{u.role==='admin'&&(view==='list'||view==='workbench')&&<nav className="management-tabs" aria-label="报修管理视图"><button aria-current={view==='list'?'page':undefined} className={view==='list'?'active':''} onClick={()=>navigate('list')}>工单列表</button><button aria-current={view==='workbench'?'page':undefined} className={view==='workbench'?'active':''} onClick={()=>navigate('workbench')}>上门异常</button></nav>}
+      <div hidden={view!=='list'}><OrderList u={u} active={view==='list'} revision={revision} onOpen={open} onNew={()=>navigate('create')}/></div>
+      {visited.has('workbench')&&u.role!=='requester'&&<div hidden={view!=='workbench'}><RepairWorkbench u={u} active={view==='workbench'} onOpen={open}/></div>}
+      {view==='create'&&<><div className="page-back"><button className="back-button" onClick={navigation.back}><Icon kind="left"/>返回{listName}</button></div><PageHeading title="新建报修" description="填写位置与故障现象，提交后即可跟进处理。"/><CreateOrder onDirtyChange={setCreateDirty} onCancel={navigation.back} onCreated={o=>{clearDirty();navigation.navigate({view:'detail',id:o.id,from:'list'},true,true); setNotice('报修已提交，等待管理员审核。');setRevision(v=>v+1);}}/></>}
+      {view==='detail'&&selected&&<OrderDetail key={`${selected}-${section||'order'}`} section={section} id={selected} u={u} onBack={navigation.back} notice={notice} onDirtyChange={setVisitDirty} onSaved={()=>setRevision(v=>v+1)}/>}
+      {view==='knowledge'&&u.role==='admin'&&<Knowledge/>}
+      {visited.has('assistant')&&<div className="assistant-page" hidden={view!=='assistant'}><Assistant role={u.role} active={view==='assistant'} onManual={()=>navigate('list')} onOpen={open} onDirtyChange={setDraftDirty} storageKey={`campus-assistant-${u.id}`} discardSignal={assistantDiscard}/></div>}
+      {view==='agents'&&u.role==='admin'&&<AgentSettings onDirtyChange={setSettingsDirty}/>}
+      {view==='audit'&&u.role==='admin'&&<Audit onOpen={open}/>}
+    </main></div>{navigation.pending&&<Drawer title="有未保存的更改" onClose={navigation.cancel}><p>离开将放弃尚未保存的编辑。正在生成或提交时，请等待完成后继续。</p><div className="drawer-actions"><button onClick={navigation.cancel}>继续编辑</button><button className="danger" onClick={()=>{if(draftDirty)setAssistantDiscard(v=>v+1);clearDirty();navigation.proceed();}}>放弃更改并继续</button></div></Drawer>}</div>;
 }
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

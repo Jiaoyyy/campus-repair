@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import {visitIssue} from '../frontend/src/visit-presentation.ts';
+const now='2026-10-30T10:00:00+08:00';
+const order={status:'in_progress',assignee_name:'虚构师傅',requester_name:'虚构报修人'};
+const base={availability_start:null,availability_end:null,exception:'',reason:'',expected_resume_at:null,needs_availability:false,visit:null};
+const expired={start:'2026-10-29T08:00:00+08:00',end:'2026-10-29T09:00:00+08:00',stage:'scheduled'};
+let checks=0;
+function check(condition){assert.ok(condition);checks++;}
+let issue=visitIssue(order,{...base,visit:expired},now);
+check(issue.role==='维修人员'&&issue.owner==='虚构师傅');check(issue.next.includes('重新确认未来上门时间'));
+issue=visitIssue(order,{...base,visit:{...expired,stage:'departed'}},now);
+check(issue.title.includes('已记录出发'));check(issue.next.includes('记录到场')&&!issue.next.includes('重新确认'));
+check(visitIssue(order,{...base,visit:{...expired,stage:'arrived'}},now)===null);
+check(visitIssue(order,{...base,visit:{...expired,end:'2026-10-30T11:00:00+08:00'}},now)===null);
+check(visitIssue({...order,status:'closed'},{...base,visit:expired},now)===null);
+issue=visitIssue(order,{...base,exception:'no_show',needs_availability:true},now);
+check(issue.role==='报修人'&&issue.owner==='虚构报修人');
+const fresh={...base,exception:'no_show',availability_start:'2026-10-31T11:00:00+08:00',availability_end:'2026-10-31T13:00:00+08:00'};
+check(visitIssue(order,fresh,now).role==='维修人员');
+check(visitIssue(order,{...fresh,availability_end:'2026-10-30T10:30:00+08:00'},now).role==='报修人');
+check(visitIssue(order,{...fresh,needs_availability:true},now).role==='报修人');
+issue=visitIssue(order,{...base,exception:'waiting_parts',expected_resume_at:'2026-10-30T09:00:00+08:00',revisit_required:true,needs_availability:true},now);
+check(issue.role==='维修人员');check(issue.title.includes('已过预计恢复'));check(issue.next.includes('重新预约并记录到场'));
+check(visitIssue(order,{...base,exception:'waiting_parts',expected_resume_at:'2026-10-31T09:00:00+08:00'},now).title==='维修因缺备件暂停');
+check(visitIssue(order,base,now)===null);
+console.log(`Visit responsibility and factual-progress checks passed: ${checks}`);

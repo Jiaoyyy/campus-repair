@@ -26,7 +26,19 @@ func Initialize(db *sql.DB, c Config) error {
 			}
 		}
 	}
-	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6)),(4,UTC_TIMESTAMP(6)),(5,UTC_TIMESTAMP(6))"); err != nil {
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6)),(4,UTC_TIMESTAMP(6)),(5,UTC_TIMESTAMP(6)),(7,UTC_TIMESTAMP(6))"); err != nil {
+		return err
+	}
+	var visitColumn int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='work_order_visit_context' AND column_name='revisit_required'").Scan(&visitColumn); err != nil {
+		return err
+	}
+	if visitColumn == 0 {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE work_order_visit_context ADD COLUMN revisit_required BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+			return err
+		}
+	}
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(8,UTC_TIMESTAMP(6))"); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -272,6 +284,9 @@ func (s *Server) update(ctx context.Context, u User, id int64, action string, a 
 	}
 	next, err := transition(o, u, action, &a)
 	if err != nil {
+		return o, err
+	}
+	if err = finishVisitForOrder(ctx, tx, o, action, next); err != nil {
 		return o, err
 	}
 	assignee := o.AssigneeID

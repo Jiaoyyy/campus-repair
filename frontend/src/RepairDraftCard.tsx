@@ -1,3 +1,4 @@
+import { Select } from './Select';
 import { useEffect, useRef, useState } from 'react';
 import { api, categoryNames } from './api';
 import type { Order } from './api';
@@ -49,7 +50,7 @@ export function RepairDraftCard({ draft, disabled, onChange, onDirtyChange, onBu
  return <section className="repair-draft" aria-label="报修草稿"><div className="section-heading"><h3>报修草稿</h3><span className="badge">尚未提交</span></div>
   <p className="muted">核对信息后确认提交，管理员收到工单后会进行审核。</p>
   <form onSubmit={e => e.preventDefault()}><fieldset disabled={busy || disabled}>
-   <label>故障类别<select aria-label="故障类别" value={input.category} onChange={e => setInput(v => ({ ...v, category: e.target.value }))}><option value="">请选择类别</option>{Object.entries(categoryNames).map(([k, v]) => <option value={k} key={k}>{v}</option>)}</select></label>
+   <label>故障类别<Select aria-label="故障类别" value={input.category} onChange={e => setInput(v => ({ ...v, category: e.target.value }))}><option value="">请选择类别</option>{Object.entries(categoryNames).map(([k, v]) => <option value={k} key={k}>{v}</option>)}</Select></label>
    <label>具体位置<input aria-label="具体位置" value={input.location} onChange={e => setInput(v => ({ ...v, location: e.target.value }))} maxLength={400} placeholder="例如：三号楼201"/></label>
    <label>故障描述<textarea aria-label="故障描述" rows={3} value={input.description} onChange={e => setInput(v => ({ ...v, description: e.target.value }))} maxLength={4000} placeholder="请描述故障现象"/></label>
    <p className="field-help">位置 {[...input.location].length}/200 字 · 描述 {[...input.description].length}/2000 字{dirty ? ' · 有未保存的修改' : ''}</p>

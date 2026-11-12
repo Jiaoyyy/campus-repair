@@ -16,3 +16,6 @@ export const categoryNames:Record<string,string>={lighting:'照明',electrical:'
 export const roleNames={requester:'报修人',technician:'维修人员',admin:'后勤管理员'};
 export const actionNames:Record<string,string>={create:'提交报修',review:'审核',resubmit:'补充并重新提交',assign:'派单',reassign:'改派',accept:'接单',records:'记录处理进展',complete:'提交维修结果',confirm:'确认问题已解决',reopen:'申请重新处理',cancel:'取消报修'};
 export function time(v:string){return new Date(v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})}
+
+export const visitActionNames:Record<string,string>={"visit.availability":"更新可上门时间","visit.schedule":"确认上门预约","visit.depart":"出发前往","visit.arrive":"到达报修位置","visit.no-show":"报修人不在","visit.wait-parts":"等待备件","visit.resume":"恢复维修处理"};
+Object.assign(actionNames,visitActionNames);

@@ -174,7 +174,7 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var previousQuery *OrderQuery
-	if previousResult != nil && previousResult.Kind == "orders" {
+	if previousResult != nil && (previousResult.Kind == "orders" || previousResult.Kind == "analysis") {
 		previousQuery = &previousResult.Query
 	}
 	queryHint := queryClarification(u.Role, input.Content, previousQuery != nil)
@@ -195,6 +195,12 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		if e == nil {
 			toolName, toolArguments = followupMCPIntent(u.Role, input.Content, []chatMessage{{Role: "user", Content: last}})
 		}
+	}
+	if intent := analysisIntent(input.Content); intent != "" && !draftIntent(u.Role, input.Content, false) {
+		q := OrderQuery{Queue: "all", Analysis: intent}
+		q = groundAnalysisQuery(q, input.Content, previousResult)
+		toolName, toolArguments = MCPQueryOrders, q
+		queryHint = ""
 	}
 	writeRequested := businessWriteRequest(input.Content)
 	if writeRequested {
@@ -272,6 +278,10 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 					terminate("query_quota_exhausted", "模型网关当前额度不足，本轮尚未查询工单。请在工单页面查看，或恢复网关额度后再提问。")
 				} else if gatewayErr.Status == 429 {
 					terminate("query_rate_limited", "模型网关当前请求受限（429），本轮尚未查询工单。请稍后重问，或到工单页面查看。")
+				} else if gatewayErr.Transport == "timeout" {
+					terminate("query_gateway_unavailable", "连接模型网关或等待响应超时，本轮尚未查询工单。原问题已保留，请检查网络或网关服务后重问，也可到工单页面查看。")
+				} else if gatewayErr.Transport != "" {
+					terminate("query_gateway_unavailable", "暂时无法连接模型网关，本轮尚未查询工单。原问题已保留，请检查网络或网关服务后重问，也可到工单页面查看。")
 				} else {
 					terminate("query_gateway_unavailable", "查询理解服务暂不可用，本轮尚未查询工单。请稍后重问，或到工单页面查看。")
 				}
@@ -284,6 +294,11 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		toolArguments = nil
 		if plan.Name != "continue_conversation" || !strings.Contains(queryHint, "每次支持一个故障类别") {
 			queryHint = ""
+		}
+		if plan.Name == "continue_conversation" && analysisIntent(input.Content) != "" {
+			plan.Name = MCPQueryOrders
+			q := groundAnalysisQuery(OrderQuery{Queue: "all"}, input.Content, previousResult)
+			plan.Arguments, _ = json.Marshal(q)
 		}
 		if plan.Name != "continue_conversation" {
 			toolName = plan.Name
@@ -314,6 +329,18 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if toolName != "" {
+		if toolName == MCPQueryOrders {
+			raw, _ := json.Marshal(toolArguments)
+			var q OrderQuery
+			if json.Unmarshal(raw, &q) == nil && q.Analysis != "" {
+				grounded, scopeErr := s.groundAnalysisLocation(ctx, u, input.Content, q)
+				if scopeErr != nil {
+					terminate("analysis_scope_unavailable", "暂时无法确认分析位置范围，请明确一个位置后重试")
+					return
+				}
+				toolArguments = grounded
+			}
+		}
 		result, callErr := s.callMCPTool(ctx, r, c.AgentID, toolName, toolArguments)
 		if callErr != nil {
 			terminate("tool_unavailable", "实时业务查询暂不可用，或该助手未绑定所需查询工具。请在工单页面核对；管理员可到助手设置检查绑定。")
@@ -341,6 +368,29 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		if formatErr != nil {
 			terminate("tool_unavailable", "实时工单查询未取得有效结果，请返回人工工单页面查看")
 			return
+		}
+		if turn.Business != nil && turn.Business.Kind == "analysis" {
+			a := turn.Business.Analysis
+			a.ModelStatus = "unavailable"
+			a.Warning = "已返回真实统计，本轮未生成模型建议。"
+			if g.configured() {
+				if writeSSE(w, "phase", map[string]string{"message": "正在分析高发问题与处理重点…"}) != nil {
+					return
+				}
+				notes, noteErr := g.analyzeBusiness(ctx, input.Content, *turn.Business)
+				if ctx.Err() != nil {
+					terminate("analysis_interrupted", "分析已停止或超时，本轮未完成，请主动重试")
+					return
+				}
+				if noteErr == nil {
+					a.Notes = notes
+					a.ModelStatus = "ready"
+					a.Warning = ""
+				} else {
+					log.Printf("insight synthesis unavailable request=%s reason=%v", requestID(r), noteErr)
+				}
+			}
+			answer = formatAnalysis(*turn.Business)
 		}
 		if err = s.finishTurn(turn, u, "complete", answer, "", requestID(r), nil); err != nil {
 			terminate("configuration_changed", "身份或助手配置已变化，本轮结果未确认，请刷新后重试")

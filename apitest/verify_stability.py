@@ -49,6 +49,7 @@ suites=[
  ('drafts',[sys.executable,'apitest/verify_drafts.py','--project',a.project,'--env-file',str(env_path)]),
  ('scenarios',[sys.executable,'apitest/verify_scenarios.py','--project',a.project,'--env-file',str(env_path)]),
  ('semantic',[sys.executable,'apitest/verify_semantic_failures.py']),
+ ('buildings',[sys.executable,'apitest/verify_building_queries.py']),
  ('mcp',['docker','run','--rm','--network',a.project+'_default','-v',str(root/'apitest')+':/verify/apitest:ro','-v',str(env_path)+':/verify/.env:ro','-e','API_TEST_URL=http://api:8080','-e','MCP_TEST_URL=http://mcp:8081/mcp','python:3.12-alpine','python','/verify/apitest/verify_mcp.py']),
  ('manual',[sys.executable,'apitest/verify_manual.py','--project',a.project,'--env-file',str(env_path)]),
 ]

@@ -16,6 +16,7 @@ import (
 const MCPQueryOrders = "query_work_orders"
 
 type OrderQuery struct {
+	Analysis string `json:"analysis,omitempty"`
 	Queue    string `json:"queue,omitempty"`
 	Status   string `json:"status,omitempty"`
 	Category string `json:"category,omitempty"`
@@ -42,6 +43,7 @@ type BusinessCandidate struct {
 	Progress   int      `json:"in_progress_count"`
 }
 type BusinessResult struct {
+	Analysis   *BusinessAnalysis   `json:"analysis,omitempty"`
 	Kind       string              `json:"kind"`
 	Query      OrderQuery          `json:"query"`
 	Total      int                 `json:"total"`
@@ -58,6 +60,9 @@ var businessCategoryNames = map[string]string{"lighting": "照明", "electrical"
 var orderNumberPattern = regexp.MustCompile(`(?i)RP[0-9a-z]{8,38}`)
 
 func (q OrderQuery) valid() bool {
+	if !queryContains([]string{"", "overview", "frequent", "no_show", "exceptions"}, q.Analysis) {
+		return false
+	}
 	if q.Queue != "" && q.Queue != "all" && q.Queue != "action" && q.Queue != "active" && q.Queue != "finished" {
 		return false
 	}
@@ -138,6 +143,9 @@ func businessQuerySQL(u User, q OrderQuery, now time.Time) (string, []any, strin
 	return where, args, basis, nil
 }
 func queryBusinessOrders(ctx context.Context, db *sql.DB, u User, q OrderQuery) (BusinessResult, error) {
+	if q.Analysis != "" {
+		return queryBusinessAnalysis(ctx, db, u, q)
+	}
 	result := BusinessResult{Kind: "orders", Query: q, Statuses: map[string]int{}, Items: []BusinessOrder{}, At: time.Now().UTC()}
 	where, args, basis, err := businessQuerySQL(u, q, result.At)
 	if err != nil {
@@ -218,6 +226,9 @@ func queryLabel(role string, q OrderQuery) string {
 	if q.Keyword != "" {
 		label += " · 故障包含“" + q.Keyword + "”"
 	}
+	if (q.Period == "" || q.Period == "all") && q.DateFrom == "" {
+		label += " · 不限日期"
+	}
 	return label
 }
 func formatBusinessResult(role string, b BusinessResult) string {
@@ -230,7 +241,11 @@ func formatBusinessResult(role string, b BusinessResult) string {
 	}
 	label := queryLabel(role, b.Query)
 	if b.Total == 0 {
-		return label + "目前没有匹配记录。" + b.TimeBasis + "。这不代表其他范围也没有工单。"
+		text := label + "目前没有匹配记录。"
+		if b.TimeBasis != "" {
+			text += "\n" + b.TimeBasis + "。时间范围外仍可能有未结束工单，可以改问“不限日期的未结束工单”。"
+		}
+		return text + "这不代表其他范围也没有工单。"
 	}
 	text := fmt.Sprintf("%s共有 %d 单。", label, b.Total)
 	parts := []string{}
@@ -257,8 +272,11 @@ func decodeBusinessResult(raw any) (*BusinessResult, error) {
 		return nil, err
 	}
 	var result BusinessResult
-	if json.Unmarshal(b, &result) != nil || result.Kind != "orders" || !result.Query.valid() || result.Total < 0 || result.At.IsZero() || result.Statuses == nil || result.Items == nil {
+	if json.Unmarshal(b, &result) != nil || (result.Kind != "orders" && result.Kind != "analysis") || !result.Query.valid() || result.Total < 0 || result.At.IsZero() || result.Statuses == nil || result.Items == nil {
 		return nil, errors.New("invalid business query result")
+	}
+	if result.Kind == "analysis" && (result.Query.Analysis == "" || !analysisFactsValid(result.Analysis)) {
+		return nil, errors.New("invalid analysis result")
 	}
 	sum := 0
 	for s, n := range result.Statuses {

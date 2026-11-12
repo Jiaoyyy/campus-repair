@@ -48,3 +48,9 @@ docker run --rm --network campus-repair-draft-check_default \
 ## 语义查询参数扩展
 
 location为位置字面子串，keyword为原始故障描述字面子串，均最多200字，使用参数绑定LOCATE，百分号和下划线不作为通配符。period支持all/today/recent/yesterday/this_week/last_week/this_month；recent含今天近7天，周一开始自然周。date_from/date_to同时为YYYY-MM-DD，含起止日且最多366天，不得与非all的相对period混用。返回列表增加description，原有组织/角色/归属和快照复核不变。日期依据对管理员/报修人仍是创建时间，对维修人员仍是当前指派最近事件。
+
+## 问题分析（2026-10-30）
+
+`query_work_orders`支持`analysis=overview|frequent|no_show|exceptions`，沿用原工具绑定、组织及本人/当前指派范围。`overview`汇总问题与当前积压，`frequent`按全量类别、准确位置和相同描述排序；最多5项排名、5张示例不代表只统计5单。`no_show`按上门记录的`no_show_at`统计次数与去重工单，不把白跑当描述关键词。`exceptions`复用现有三类队列，合计去重；当前异常及创建已满7天未结束的关注项不按创建日期窗口排除旧单。
+
+分析默认近期7个北京时间自然日，可用原日期/位置/类别筛选。期间工单按原创建/当前指派时间口径；白跑按事件发生时间，当前异常是即时快照，分别标注。分析返回`kind=analysis`与带稳定ID的事实、排名及口径。模型建议在API统计成功后生成，MCP自身只返回事实；模型、JSON或证据校验失败时明确保留事实、未生成建议。不能通过analysis传org_id/user_id、执行写操作或绕过被禁用绑定。

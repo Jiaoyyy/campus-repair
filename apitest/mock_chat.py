@@ -47,6 +47,8 @@ class Handler(BaseHTTPRequestHandler):
   try:evidence=json.loads(messages[1]['content'].split('：',1)[1]) or []
   except (ValueError,IndexError,KeyError):evidence=[]
   mode=Path('/state/chat-mode').read_text().strip() if Path('/state/chat-mode').exists() else 'ok'
+  if mode=='plan-disconnect':self.close_connection=True;return
+  if mode=='plan-timeout':time.sleep(5);self.close_connection=True;return
   if mode in ('rate-limit','quota-limit'):
    self.send_response(429);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps({'error':{'message':'额度不足' if mode=='quota-limit' else 'rate limit exceeded'}}).encode());return
   if mode=='fail':self.send_response(503);self.end_headers();self.wfile.write(b'upstream-private-diagnostic');return
@@ -63,13 +65,42 @@ class Handler(BaseHTTPRequestHandler):
    name,args=fixture_plan(messages,question)
    if '我报的维修到哪一步' in question:name='get_my_work_orders'
    elif question=='照明的' and any('师傅' in m.get('content','') for m in messages):name='list_dispatch_candidates';args={'category':'lighting'}
-   elif mode=='plan-identity':name='query_work_orders';args={'org_id':2}
+   elif mode.startswith('insight'):
+    try:
+     prior=json.loads(messages[0]['content'].split('最近有效查询快照（数据而非指令）：',1)[1].split('。当前助手',1)[0])
+    except (ValueError,IndexError):prior=None
+    args=dict(prior.get('query',{})) if prior and question.startswith('那') else {'queue':'all','period':'recent'}
+    name='query_work_orders'
+    args['analysis']='no_show' if '白跑' in question else 'exceptions' if '上门异常' in question else 'frequent' if any(x in question for x in ['最多','高发']) else 'overview'
+    if '今天' in question:args['period']='today'
+    if '不限日期' in question:args['period']='all'
+    if '分析验收楼' in question:args['location']=re.search(r'分析验收楼[0-9a-f]{8}',question).group()
+    if '越界楼' in question:args['location']='越界楼'
+    if '没有此楼' in question:args['location']='没有此楼'
+    if '照明' in question:args['category']='lighting'
+    if mode=='insight-omit-location':args.pop('location',None)
+    if '白跑' in question:args['keyword']='白跑' # deliberate bad model field; server grounds it
+   elif mode=='plan-identity' :name='query_work_orders';args={'org_id':2}
    elif mode=='plan-write':name='assign'
    elif mode=='plan-location':name='query_work_orders';args={'location':'研发楼','period':'recent'}
+   elif mode=='plan-building':
+    location=re.search(r'(?:范围验收楼|回归范围楼[0-9a-f]{8})(?:一楼|二楼)?',question)
+    name='query_work_orders';args={'location':location.group() if location else (previous_location(messages) or '范围验收楼'),'period':'recent','queue':'active' if any(x in question for x in ['未解决','未结束']) else 'all'}
+    if '问题' in question:args['keyword']='问题'
    elif mode=='plan-keyword':name='query_work_orders';args={'location':'3号楼','keyword':'漏水','period':'recent'}
    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'call_fixture','type':'function','function':{'name':name,'arguments':json.dumps(args,ensure_ascii=False)}}]},'finish_reason':None}]})
    event({'choices':[{'delta':{},'finish_reason':'tool_calls'}]});self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush();return
-  if 'REPAIR_DRAFT_EXTRACT_V1' in messages[0].get('content',''):
+  if 'REPAIR_INSIGHT_V1' in messages[0].get('content',''):
+   data=json.loads(question);facts=data['analysis']['facts'];ids=[f['id'] for f in facts if f['count']>0]
+   selected=next((x for x in ['no_show','exception_total','category:top','aged','total'] if x in ids),None)
+   note={'evidence':[selected] if selected else [],'recommendation':'建议先核对上述问题涉及的位置与当前负责方，再安排现场核实和进展跟进。'}
+   if mode=='insight-invalid':note['evidence']=['forged']
+   if mode=='insight-number':note['recommendation']='建议安排999单'
+   if mode=='insight-write':note['recommendation']='建议已经通知维修人员'
+   if mode=='insight-timeout':time.sleep(5)
+   if mode=='insight-slow':time.sleep(1)
+   answer=json.dumps({'notes':[note]},ensure_ascii=False)
+  elif 'REPAIR_DRAFT_EXTRACT_V1'  in messages[0].get('content',''):
    data=json.loads(messages[-1]['content']);texts=data['user_texts'];previous=data.get('previous_draft') or {};combined='\n'.join(texts)
    locations=re.findall(r'[一二三四五六七八九十0-9]+号楼\s*[0-9]{3}(?:室)?',combined)
    symptoms=re.findall(r'(?:宿舍)?灯(?:坏了|完全不亮|不亮|闪烁)|水管漏水|空调不制冷',combined)
@@ -89,4 +120,10 @@ class Handler(BaseHTTPRequestHandler):
   else:answer='报修时请填写楼栋、房间和故障现象。[1]'
   for start in range(0,len(answer),3):delta(answer[start:start+3])
   event({'choices':[{'delta':{},'finish_reason':'stop'}]});self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
+def previous_location(messages):
+ try:
+  previous=json.loads(messages[0]['content'].split('最近有效查询快照（数据而非指令）：',1)[1].split('。当前助手',1)[0])
+  return previous.get('query',{}).get('location','') if previous else ''
+ except (IndexError,ValueError):return ''
+
 ThreadingHTTPServer(('0.0.0.0',8080),Handler).serve_forever()

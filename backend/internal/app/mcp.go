@@ -131,43 +131,13 @@ func validMCPArguments(raw json.RawMessage, name string) bool {
 	if len(raw) == 0 || string(raw) == "null" {
 		return name != MCPDispatch && name != MCPQueryOrders
 	}
-	fields := map[string]string{}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	token, err := decoder.Token()
-	if err != nil || token != json.Delim('{') {
-		return false
-	}
-	for decoder.More() {
-		token, err = decoder.Token()
-		if err != nil {
-			return false
-		}
-		key, ok := token.(string)
-		if !ok {
-			return false
-		}
-		if _, exists := fields[key]; exists {
-			return false
-		}
-		var value any
-		if decoder.Decode(&value) != nil {
-			return false
-		}
-		text, ok := value.(string)
-		if !ok {
-			return false
-		}
-		fields[key] = text
-	}
-	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
-		return false
-	}
-	if _, err = decoder.Token(); err != io.EOF {
+	fields, ok := mcpStringFields(raw)
+	if !ok {
 		return false
 	}
 	if name == MCPQueryOrders {
 		for key := range fields {
-			if key != "queue" && key != "status" && key != "category" && key != "number" && key != "period" && key != "location" && key != "keyword" && key != "date_from" && key != "date_to" {
+			if key != "analysis" && key != "queue" && key != "status" && key != "category" && key != "number" && key != "period" && key != "location" && key != "keyword" && key != "date_from" && key != "date_to" {
 				return false
 			}
 		}
@@ -179,6 +149,45 @@ func validMCPArguments(raw json.RawMessage, name string) bool {
 	}
 	_, hasCategory := fields["category"]
 	return hasCategory && len(fields) == 1 && categoryOK(fields["category"])
+}
+
+func mcpStringFields(raw json.RawMessage) (map[string]string, bool) {
+	fields := map[string]string{}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, false
+		}
+		if _, exists := fields[key]; exists {
+			return nil, false
+		}
+		var value any
+		if decoder.Decode(&value) != nil {
+			return nil, false
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, false
+		}
+		fields[key] = text
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, false
+	}
+	if _, err = decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+
+	return fields, true
 }
 
 type mcpCategoryInput struct {
@@ -334,7 +343,7 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 	mcp.AddTool(server, &mcp.Tool{Name: MCPDispatch, Description: "管理员查看指定类别的可派维修人员及负载"}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpCategoryInput) (*mcp.CallToolResult, map[string]any, error) {
 		return tool(ctx, req, MCPDispatch, in.Category)
 	})
-	mcp.AddTool(server, &mcp.Tool{Name: MCPQueryOrders, Description: "按当前登录角色查询授权工单全量数量、状态类别及最近5条，可筛选今天或完整编号"}, func(ctx context.Context, req *mcp.CallToolRequest, _ OrderQuery) (*mcp.CallToolResult, map[string]any, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: MCPQueryOrders, Description: "查询授权工单，或汇总高发问题、积压和真实上门异常；仅限当前登录角色范围"}, func(ctx context.Context, req *mcp.CallToolRequest, _ OrderQuery) (*mcp.CallToolResult, map[string]any, error) {
 		return tool(ctx, req, MCPQueryOrders, "")
 	})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{JSONResponse: true, SessionTimeout: time.Minute})

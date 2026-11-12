@@ -146,6 +146,34 @@ SSE在meta之后可发送兼容可忽略的 `phase` 事件，data为 `{message}`
 
 配置模型时先通过原生tool_calls生成只读查询计划，meta.tool为兼容旧客户端保留的初步意图提示，不作为实际调用证据；查询done另含实际tool，业务成功以business与MCP审计为准。语义计划非法返回query_plan_failed，执行失败返回tool_unavailable，均不发布business。普通模型正文完整缓冲并检查后才输出delta，未通过的缓冲内容不写为可见部分回答；phase及唯一done/error规则保持。新增参数的精确口径见 [MCP说明](mcp.md)。
 
-查询计划阶段网关HTTP错误分为query_rate_limited（429）、query_quota_exhausted（明确额度不足）、query_gateway_unavailable；非法模型计划仍为query_plan_failed。各错误均不发布business，不自动重试；错误正文/私有提示词不写日志，诊断仅含固定阶段码、状态码及额度分类。
+查询计划阶段网关HTTP错误分为query_rate_limited（429）、query_quota_exhausted（明确额度不足）、query_gateway_unavailable；连接拒绝、DNS/TLS失败、请求及流读取超时同样返回query_gateway_unavailable，超时明确显示“超时”，不能提示用户改问法。非法模型计划仍为query_plan_failed。各错误均不发布business，不自动重试；错误正文/私有提示词不写日志，诊断仅含固定connection/timeout阶段码、状态码及额度分类，不保存底层错误中的URL。
+
+原生查询计划通过严格工具/参数校验后复核日期来源：独立问题未指定时间则使用period=all并清除模型擅自生成的date_from/date_to；有效短追问继承上一查询的实际日期，明确时间表达保留原契约。楼名使用location字面子串即可匹配楼层，不要求楼层必填。结果正文明确不限日期；带日期的空结果说明范围外仍可能有未结束工单，不执行额外查询或扩大时间。MCP接口本身的日期字段和授权规则不变。
 
 稳定化契约：回答正文delta仅在完成事务最终校验成功后发布，失败partial不含未核验缓冲。done已保存而客户端断开时，应读取历史确认状态，不能自动重问。SSE客户端严格核对本轮conversation_id/message_id与字段类型，支持跨字节CRLF/UTF-8分片；失败仍保留输入供编辑。只读工具的null/非字符串/重复键参数被拒绝。
+
+## 上门安排（产品体验迭代）
+
+上门信息独立于九种工单主状态，所有读写按当前登录组织和工单归属校验；模型和MCP没有写工具。建单请求及草稿三字段保持不变，上门时间在建单后选填。
+
+- `GET /api/work-orders/{id}/visit`：返回`context`、工单`version`、当前用户`allowed_actions`、`as_of`。context包含`availability_start/end`、有效`visit`（id/start/end/stage/departed_at/arrived_at）、`exception/reason/expected_resume_at`、`needs_availability`及`revisit_required`。无预约为null；历史在工单时间线保留。
+- `PUT /api/work-orders/{id}/visit/availability`：仅本人报修人，body为`version,start,end,reason`；start/end同时为null表示清除。开始须在未来14天内、时长30分钟至4小时，使用RFC3339带时区时间。已确认预约调整需原因并撤销旧预约；出发/到场后不能修改。
+- `POST /api/work-orders/{id}/visit/actions/{action}`：仅接单后的当前维修人员，body均含version。schedule附start/end（位于最新偏好内，改已有预约需reason）；depart/arrive记录服务端时间；no-show须先到场并附reason；wait-parts附reason及未来expected_resume_at；resume附reason且仅恢复待备件。出发时已过预约结束时间返回409，已出发后允许迟到到场。
+- 上门写入成功返回`{version: 新版本}`，客户端重新读取工单和上门信息。未知字段/非法时间为400，禁止角色403，不可见404，旧版本/非法阶段409，依赖或审计失败503且整体回滚。网络结果未知时先重读，不自动重放写操作。
+- 白跑后必须本人重新提供时间并完成新预约到场才能结单。待备件期间禁止结单；恢复不清除既存的重新上门要求。改派、重处理和终止动作撤销现行预约，历史不删除。
+
+保存偏好示例（Bearer和ID由实际登录/建单结果取得，日期需替换为未来有效窗口）：
+
+```json
+{"version":1,"start":"2026-10-24T14:00:00+08:00","end":"2026-10-24T16:00:00+08:00","reason":"下午方便在场"}
+```
+
+### 工作台与协调统计
+
+`GET /api/repair-workbench?view=…&page=1&page_size=20`返回items（order/context/allowed_actions）、counts、total、page/page_size及as_of，响应中的数量与列表在一致性快照内读取。
+
+- 维修人员：pending待接单；unscheduled为处理中无有效预约且非待备件；today为有效预约开始日在北京时间今天；processing为全部处理中。队列可重叠，今日按预约开始升序/ID升序，其余按更新时间降序/ID降序。
+- 管理员：overdue为有效预约尚未到场且结束时间严格早于as_of（包含已出发）；reschedule为处理中曾记录无人、尚无新有效预约；parts为处理中尚未恢复的待备件。逾期按约定结束时间升序/ID升序，其余按更新时间降序/ID降序。
+- `GET /api/repair-workbench/metrics?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD`仅管理员；缺省近7天含今天，指定时须同时提供日期，最长366天。counts含当前overdue/parts及区间内no_show。白跑按本组织唯一预约的no_show_at北京时间日期计次，不按改约、备件或重试计数。返回实际日期范围和as_of，不代表全校白跑率或改善比例。
+
+隔离验收：`python3 apitest/verify_visits.py`，仅固定的draft-check模拟依赖环境；不向真实网关发送请求。

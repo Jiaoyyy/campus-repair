@@ -23,7 +23,8 @@ export function Icon({ kind = 'orders' }: { kind?: string }) {
  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[kind] || paths.orders}</svg>;
 }
 export function PageHeading({ title, description, children }: { title: string; description?: string; children?: ReactNode }) {
- return <div className="page-heading"><div><h1>{title}</h1>{description && <p className="muted">{description}</p>}</div>{children && <div className="heading-actions">{children}</div>}</div>;
+ const kind = title.includes('助手设置') ? 'settings' : title.includes('助手') ? 'chat' : title.includes('知识') ? 'book' : title.includes('审计') ? 'audit' : title.includes('新建') ? 'plus' : title.includes('上门') || title.includes('维修工作') ? 'tool' : 'orders';
+ return <div className="page-heading"><div className="page-heading-main"><span className="page-symbol"><Icon kind={kind}/></span><div><h1>{title}</h1>{description && <p className="muted">{description}</p>}</div></div>{children && <div className="heading-actions">{children}</div>}</div>;
 }
 export function Loading({ text = '正在读取…' }: { text?: string }) { return <div className="loading" role="status"><span className="spinner"/>{text}</div>; }
 export function Empty({ title, description, children, icon = 'file' }: { title: string; description?: string; children?: ReactNode; icon?: string }) {
@@ -38,7 +39,7 @@ export function Drawer({ title, onClose, children }: { title: string; onClose: (
   function keys(e: KeyboardEvent) {
    if (e.key === 'Escape') { e.preventDefault(); close.current(); }
    if (e.key !== 'Tab') return;
-   const nodes = [...(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]') || [])].filter(el => el.getClientRects().length > 0);
+   const nodes = [...(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),summary,[tabindex="0"]') || [])].filter(el => el.getClientRects().length > 0 && el.tabIndex >= 0);
    const first = nodes[0], last = nodes.at(-1);
    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
    if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
