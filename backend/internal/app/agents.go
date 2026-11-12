@@ -151,7 +151,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	seenTools := map[string]bool{}
 	for _, name := range a.Tools {
-		if mcpRoles[name] != a.Role || seenTools[name] {
+		if !mcpRoleAllowed(name, a.Role) || seenTools[name] {
 			s.fail(w, r, bad("工具不在该角色的只读白名单内或重复"))
 			return
 		}

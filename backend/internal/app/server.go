@@ -87,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/conversations", s.protect(s.createConversation))
 	m.HandleFunc("GET /api/conversations/{id}/messages", s.protect(s.messages))
 	m.HandleFunc("POST /api/conversations/{id}/messages", s.protect(s.messageStream))
+	m.HandleFunc("GET /api/conversations/{id}/drafts/{message}", s.protect(s.getDraft))
+	m.HandleFunc("PUT /api/conversations/{id}/drafts/{message}", s.protect(s.editDraft))
 	m.HandleFunc("GET /api/conversations/{id}/citations/{message}/{chunk}", s.protect(s.citationSource))
 	m.HandleFunc("GET /api/capabilities", s.protect(s.capabilities))
 	m.HandleFunc("GET /api/retrieval", s.protect(s.retrieval))
@@ -95,6 +97,11 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/materials/{id}", s.protect(s.materialDetail))
 	m.HandleFunc("GET /api/materials/{id}/file", s.protect(s.materialFile))
 	m.HandleFunc("POST /api/materials/{id}/reindex", s.protect(s.reindexMaterial))
+	m.HandleFunc("GET /api/repair-workbench", s.protect(s.visitWorkbench))
+	m.HandleFunc("GET /api/repair-workbench/metrics", s.protect(s.visitMetrics))
+	m.HandleFunc("GET /api/work-orders/{id}/visit", s.protect(s.visitGet))
+	m.HandleFunc("PUT /api/work-orders/{id}/visit/availability", s.protect(s.visitWrite))
+	m.HandleFunc("POST /api/work-orders/{id}/visit/actions/{action}", s.protect(s.visitWrite))
 	m.HandleFunc("GET /api/work-orders/summary", s.protect(s.summary))
 	m.HandleFunc("GET /api/work-orders", s.protect(s.list))
 	m.HandleFunc("POST /api/work-orders", s.protect(s.createHTTP))
@@ -147,12 +154,15 @@ func (s *Server) createHTTP(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, denied())
 		return
 	}
-	var input Input
+	var input struct {
+		Input
+		draftConfirmation
+	}
 	if err := decode(w, r, &input); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	o, replay, err := s.create(r.Context(), u, input, r.Header.Get("Idempotency-Key"), requestID(r))
+	o, replay, err := s.createWithDraft(r.Context(), u, input.Input, r.Header.Get("Idempotency-Key"), requestID(r), input.draftConfirmation)
 	if err != nil {
 		s.fail(w, r, err)
 		return

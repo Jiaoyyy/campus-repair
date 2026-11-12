@@ -1,5 +1,7 @@
 .DS_Store
 .env
+# Machine-specific Compose overrides (for example, local gateway DNS repair).
+compose.override.yaml
 .env.*
 !.env.example
 node_modules/

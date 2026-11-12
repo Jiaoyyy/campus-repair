@@ -26,7 +26,19 @@ func Initialize(db *sql.DB, c Config) error {
 			}
 		}
 	}
-	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6)),(4,UTC_TIMESTAMP(6))"); err != nil {
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(1,UTC_TIMESTAMP(6)),(2,UTC_TIMESTAMP(6)),(3,UTC_TIMESTAMP(6)),(4,UTC_TIMESTAMP(6)),(5,UTC_TIMESTAMP(6)),(7,UTC_TIMESTAMP(6))"); err != nil {
+		return err
+	}
+	var visitColumn int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='work_order_visit_context' AND column_name='revisit_required'").Scan(&visitColumn); err != nil {
+		return err
+	}
+	if visitColumn == 0 {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE work_order_visit_context ADD COLUMN revisit_required BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+			return err
+		}
+	}
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations VALUES(8,UTC_TIMESTAMP(6))"); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -70,6 +82,21 @@ func Initialize(db *sql.DB, c Config) error {
 			}
 		}
 	}
+	var migrated int
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version=6").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO agent_tools(agent_id,tool_name,enabled) SELECT id,?,TRUE FROM agents WHERE seed_key IN ('requester','technician','admin')", MCPQueryOrders); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE agents SET version=version+1 WHERE seed_key IN ('requester','technician','admin')"); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(6,UTC_TIMESTAMP(6))"); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -106,7 +133,16 @@ func (s *Server) getOrder(ctx context.Context, u User, id int64) (Order, error) 
 	s.enrich(ctx, &o)
 	return o, nil
 }
+
+type draftConfirmation struct {
+	MessageID int64 `json:"draft_message_id"`
+	Version   int64 `json:"draft_version"`
+}
+
 func (s *Server) create(ctx context.Context, u User, i Input, key, requestID string) (Order, bool, error) {
+	return s.createWithDraft(ctx, u, i, key, requestID, draftConfirmation{})
+}
+func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requestID string, ref draftConfirmation) (Order, bool, error) {
 	var o Order
 	if u.Role != "requester" {
 		return o, false, denied()
@@ -125,6 +161,49 @@ func (s *Server) create(ctx context.Context, u User, i Input, key, requestID str
 		return o, false, err
 	}
 	defer tx.Rollback()
+	var draft *RepairDraft
+	if ref.MessageID != 0 || ref.Version != 0 {
+		var cid int64
+		err = tx.QueryRowContext(ctx, "SELECT d.conversation_id FROM repair_drafts d JOIN conversations c ON c.id=d.conversation_id WHERE d.message_id=? AND c.org_id=? AND c.owner_id=?", ref.MessageID, u.OrgID, u.ID).Scan(&cid)
+		if err != nil {
+			return o, false, dbError(err)
+		}
+		if err = s.lockDraftConversation(ctx, tx, u, cid); err != nil {
+			return o, false, err
+		}
+		d, e := scanDraft(tx.QueryRowContext(ctx, "SELECT "+draftColumns+" FROM repair_drafts d LEFT JOIN work_orders o ON o.id=d.order_id WHERE d.message_id=? FOR UPDATE", ref.MessageID))
+		if e != nil {
+			return o, false, dbError(e)
+		}
+		if d.Version != ref.Version || d.Input != i || d.Key != key {
+			return o, false, draftConflict()
+		}
+		if d.Status == "submitted" && d.OrderID != nil {
+			o, err = scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=? AND org_id=? AND requester_id=?", *d.OrderID, u.OrgID, u.ID))
+			if err != nil {
+				return o, false, err
+			}
+			if err = tx.Commit(); err != nil {
+				return o, false, err
+			}
+			s.enrich(ctx, &o)
+			return o, true, nil
+		}
+		if d.Status != "active" {
+			return o, false, draftConflict()
+		}
+		draft = &d
+	}
+	linkDraft := func(id int64) error {
+		if draft == nil {
+			return nil
+		}
+		_, e := tx.ExecContext(ctx, "UPDATE repair_drafts SET status='submitted',order_id=? WHERE message_id=?", id, draft.MessageID)
+		if e == nil {
+			e = writeAudit(ctx, tx, requestID, &u, "draft.submit", draft.MessageID, "success", map[string]any{"work_order_id": id, "version": draft.Version})
+		}
+		return e
+	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM idempotency_records WHERE org_id=? AND user_id=? AND idem_key=? AND expires_at<=UTC_TIMESTAMP(6)", u.OrgID, u.ID, key); err != nil {
 		return o, false, err
 	}
@@ -142,6 +221,9 @@ func (s *Server) create(ctx context.Context, u User, i Input, key, requestID str
 	if existing.Valid {
 		o, err = scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=? AND org_id=? AND requester_id=?", existing.Int64, u.OrgID, u.ID))
 		if err != nil {
+			return o, false, err
+		}
+		if err = linkDraft(o.ID); err != nil {
 			return o, false, err
 		}
 		if err = tx.Commit(); err != nil {
@@ -172,6 +254,9 @@ func (s *Server) create(ctx context.Context, u User, i Input, key, requestID str
 	if err != nil {
 		return o, false, err
 	}
+	if err = linkDraft(o.ID); err != nil {
+		return o, false, err
+	}
 	if err = tx.Commit(); err != nil {
 		return o, false, err
 	}
@@ -199,6 +284,9 @@ func (s *Server) update(ctx context.Context, u User, id int64, action string, a 
 	}
 	next, err := transition(o, u, action, &a)
 	if err != nil {
+		return o, err
+	}
+	if err = finishVisitForOrder(ctx, tx, o, action, next); err != nil {
 		return o, err
 	}
 	assignee := o.AssigneeID

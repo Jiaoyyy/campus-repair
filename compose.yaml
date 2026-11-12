@@ -25,6 +25,7 @@ services:
     volumes: ["uploads:/data/uploads"]
     restart: "no"
   api:
+    image: campus-repair-api:latest
     build: ./backend
     environment: &backend-env
       CHAT_BASE_URL: ${CHAT_BASE_URL:-}
@@ -62,6 +63,7 @@ services:
       start_period: 5s
     restart: unless-stopped
   worker:
+    image: campus-repair-api:latest
     build: ./backend
     command: ["/app/worker"]
     environment: *backend-env
@@ -69,6 +71,7 @@ services:
       api: {condition: service_healthy}
     restart: unless-stopped
   mcp:
+    image: campus-repair-api:latest
     build: ./backend
     command: ["/app/mcp"]
     environment: *backend-env
@@ -76,6 +79,7 @@ services:
       api: {condition: service_healthy}
     restart: unless-stopped
   web:
+    image: campus-repair-web:latest
     build:
       context: .
       dockerfile: deploy/web.Dockerfile

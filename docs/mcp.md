@@ -11,12 +11,13 @@
 | `get_my_work_orders` | 报修人 | 空对象 | 本人本组织最近 20 条工单的编号、状态、类别、位置和时间 |
 | `get_assigned_work_orders` | 维修人员 | 空对象 | 本人已分配的本组织最近 20 条工单的相同字段 |
 | `list_dispatch_candidates` | 管理员 | `category`，三种故障类别之一 | 同组织启用且负责该类别的人员 ID、名称、匹配类别、待接单和处理中数量 |
+| `query_work_orders` | 三角色，按各自授权范围 | queue/status/category/number/period | 全量计数、状态计数、最近更新最多5条及查询时间 |
 
-模型参数不能指定用户、组织或角色。没有创建、审核、派单、改派或结单工具。`tools/list` 只列出固定三项；每次 `tools/call` 重新检查角色、会话、助手启用状态和工具绑定。未知工具、非法参数、伪造身份字段、跨组织访问和已撤销登录均拒绝。
+模型参数不能指定用户、组织或角色。没有创建、审核、派单、改派或结单工具。`tools/list` 只列出固定四项；每次 `tools/call` 重新检查角色、会话、助手启用状态和工具绑定。未知工具、非法参数、伪造身份字段、跨组织访问和已撤销登录均拒绝。
 
 API 用本地 `MCP_CALL_SECRET` 产生最长 60 秒的 HMAC 签名凭据，载荷含当前登录会话哈希、助手 ID、请求 ID、受众和时间。凭据由 API 放入内部请求的 Authorization 与工具调用 `_meta`，不传给模型或浏览器，也不进审计日志。MCP Server 验签后回查 MySQL 中的有效会话与账号。每个请求 ID 最多三次工具调用，每次 Host 和 Server 均设 10 秒上限；不自动重试。审计只记真实操作者、请求 ID、工具名、最小参数、耗时及成功/拒绝/失败。
 
-当前助手对明确的进度/任务/可派人员问题使用保守的服务端意图路由，实际调用 MCP Client，把原样受控字段格式化为会话回答。自然交流与资料问答走自动资料/模型路径；三项技能及模型原生 tool-calling 尚未接入，模型返回 `tool_calls` 仍按协议错误处理。工具失败、超时或无授权时 SSE 返回 `error`，不会编造实时工单数据；人工工单页面独立可用。
+配置模型时，助手先使用原生function calling产生单次只读计划，严格组装/校验后经MCP Client/Server执行。普通聊天及资料问答继续原路径，明确草稿走原有提取器；业务结论从真实工具结果生成。未知/写工具、越权参数或无效协议均失败。未配置模型时保留关键词降级。此实现不是通用多步Agent循环，三项完整可配置技能仍未完成。工具失败、超时或无授权时SSE返回error，人工工单页面独立可用。
 
 ## 本地运行与验收
 
@@ -25,11 +26,31 @@ API 用本地 `MCP_CALL_SECRET` 产生最长 60 秒的 HMAC 签名凭据，载�
 在项目根目录执行：
 
 ```sh
-docker run --rm --network campus-repair_default -v "$PWD:/work:ro" -w /work \
+docker run --rm --network campus-repair-draft-check_default \
+  -v "$PWD/apitest:/verify/apitest:ro" -v "$PWD/tmp/draft-check.env:/verify/.env:ro" \
   -e API_TEST_URL=http://api:8080 -e MCP_TEST_URL=http://mcp:8081/mcp \
-  python:3.12-alpine python apitest/verify_mcp.py
+  python:3.12-alpine python /verify/apitest/verify_mcp.py
 ```
 
-脚本使用本地演示账号，给三个角色的助手绑定各自工具，验证协议消息、页面结果一致性、越权/伪造参数/跨组织/过期与登出拒绝、单轮限额、解绑拒绝、审计以及助手 SSE 和消息持久化，最后恢复临时解绑。它会创建一条演示会话，不删除已有数据，不输出密码或令牌。协议错误和慢响应另由 `backend/internal/app/mcp_test.go` 的受控 HTTP 测试覆盖；真实公网和课程网关联调不由这些测试替代。
+脚本须在上述独立隔离项目运行，使用隔离演示账号，给三个角色的助手绑定各自工具，验证协议消息、页面结果一致性、越权/伪造参数/跨组织/过期与登出拒绝、单轮限额、解绑拒绝、审计以及助手 SSE 和消息持久化，最后恢复临时解绑。它会创建一条演示会话，不删除已有数据，不输出密码或令牌。协议错误和慢响应另由 `backend/internal/app/mcp_test.go` 的受控 HTTP 测试覆盖；真实公网和课程网关联调不由这些测试替代。
 
 自然表述支持示例：“我报的维修到哪一步了”“今天派给我的有哪些活”“照明有几位师傅可以安排”。管理员问“我们有几个师傅”时不会调用缺少类别的工具或推断总人数，而是先追问类别；下一轮短句“照明的”结合本人的上一轮问题调用原有角色工具。对话回答不再显示内部 MCP 协议字样或无关人员 ID。角色、组织、会话和绑定校验保持。
+
+
+## 授权工单概览与筛选（2026-10-23）
+
+新增第四个固定只读工具query_work_orders，角色标记为all，但Host与Server仍从真实会话执行三角色组织/归属过滤。schema为queue/status/category/number/period/location/keyword/date_from/date_to；未知参数、伪造身份和非法枚举被拒绝。返回全量计数、最多5条概要、查询时间及日期口径。每次查询计入原有单轮三次限额和10秒预算，不接受任意SQL、外部地址或业务写动作。具体字段见api.md。
+
+迁移6为种子助手一次性添加绑定并提升配置版本；停用助手不因此启用，旧绑定不改。管理员移除后重启不恢复，自定义助手由管理员显式绑定。发现列表中的role=all表示支持三种合法角色，不能当作不鉴权。
+
+人员负载的页面与MCP字段名历史上不同：页面pending_count为两种进行中状态的总量，MCP分别返回pending_count及in_progress_count；协议验收按两项之和与页面核对。历史工具结果只作为会话快照，不作为后续实时数据。
+
+## 语义查询参数扩展
+
+location为位置字面子串，keyword为原始故障描述字面子串，均最多200字，使用参数绑定LOCATE，百分号和下划线不作为通配符。period支持all/today/recent/yesterday/this_week/last_week/this_month；recent含今天近7天，周一开始自然周。date_from/date_to同时为YYYY-MM-DD，含起止日且最多366天，不得与非all的相对period混用。返回列表增加description，原有组织/角色/归属和快照复核不变。日期依据对管理员/报修人仍是创建时间，对维修人员仍是当前指派最近事件。
+
+## 问题分析（2026-10-30）
+
+`query_work_orders`支持`analysis=overview|frequent|no_show|exceptions`，沿用原工具绑定、组织及本人/当前指派范围。`overview`汇总问题与当前积压，`frequent`按全量类别、准确位置和相同描述排序；最多5项排名、5张示例不代表只统计5单。`no_show`按上门记录的`no_show_at`统计次数与去重工单，不把白跑当描述关键词。`exceptions`复用现有三类队列，合计去重；当前异常及创建已满7天未结束的关注项不按创建日期窗口排除旧单。
+
+分析默认近期7个北京时间自然日，可用原日期/位置/类别筛选。期间工单按原创建/当前指派时间口径；白跑按事件发生时间，当前异常是即时快照，分别标注。分析返回`kind=analysis`与带稳定ID的事实、排名及口径。模型建议在API统计成功后生成，MCP自身只返回事实；模型、JSON或证据校验失败时明确保留事实、未生成建议。不能通过analysis传org_id/user_id、执行写操作或绕过被禁用绑定。

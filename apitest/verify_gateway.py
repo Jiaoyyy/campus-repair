@@ -28,7 +28,8 @@ def run(argv, data=None):
 
 
 class Verification:
-    def __init__(self, port):
+    def __init__(self, port, draft_only=False):
+        self.draft_only = draft_only
         source = json.loads(run(['docker', 'compose', 'config', '--format', 'json']))
         self.gateway = source['services']['api']['environment']
         if not all(self.gateway.get(key) for key in GATEWAY_KEYS):
@@ -151,6 +152,9 @@ class Verification:
         admin = tokens['admin']
         # Fresh role assistants have no materials: these calls must still reach the real model.
         own = self.request('GET', '/api/agents', tokens['requester'])['items'][0]['id']
+        if self.draft_only:
+            self.verify_conversational(own, tokens)
+            return
         general = []
         cid, meta, done = self.turn(own, tokens['requester'], '你好，你可以怎么帮我？')
         self.check('报修' in done['answer'] and not done['citations'], '无材料也能自然介绍报修帮助')
@@ -169,6 +173,7 @@ class Verification:
         self.check(not meta.get('tool') and any(word in done['answer'] for word in ('哪类', '哪一类', '照明', '电器', '类别')), '自然人员问题缺少类别时追问，不伪造人数')
         general.append({'question': '我们有几个师傅？', 'request_id': meta['request_id'], **done})
         self.evidence['natural_dialogue'] = general
+        self.verify_conversational(own, tokens)
         text = '演示资料，不代表校方制度。\n照明报修请填写楼栋、房间、故障现象和发现时间。\n演示验收识别词：青竹灯塔。'
         boundary = 'gateway' + secrets.token_hex(8)
         body = (f'--{boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\n演示：真实网关联调须知\r\n'
@@ -186,10 +191,10 @@ class Verification:
         agents = self.request('GET', '/api/agents?manage=1', admin)['items']
         tools = {'requester': 'get_my_work_orders', 'technician': 'get_assigned_work_orders', 'admin': 'list_dispatch_candidates'}
         discovered = self.request('GET', '/api/mcp/tools', admin)['items']
-        self.check({x['name'] for x in discovered} == set(tools.values()), '内部 MCP 工具发现成功')
+        self.check({x['name'] for x in discovered} == set(tools.values()) | {'query_work_orders'}, '内部 MCP 工具发现成功')
         by_role = {}
         for agent in agents:
-            agent.update(enabled=True, material_ids=[mid], tool_names=[tools[agent['role']]])
+            agent.update(enabled=True, material_ids=[mid], tool_names=[tools[agent['role']], 'query_work_orders'])
             by_role[agent['role']] = self.request('PUT', f'/api/agents/{agent["id"]}', admin, agent)['agent']
         aid = by_role['requester']['id']
         for mode in ('keyword', 'vector', 'hybrid'):
@@ -228,10 +233,21 @@ class Verification:
             if role != 'admin':
                 self.check(order['number'] in done['answer'], role + ' 查询包含已派单演示工单')
             mcp_evidence.append({'role': role, 'request_id': meta['request_id'], 'tool': meta['tool'], 'answer': done['answer']})
+        scenario_evidence = []
+        for role, name in [('admin', 'admin'), ('requester', 'requester'), ('technician', 'tech')]:
+            cid, meta, done = self.turn(by_role[role]['id'], tokens[name], '我现在有多少工单要处理')
+            result = done.get('business', {})
+            expected = self.request('GET', '/api/work-orders/summary', tokens[name])['action']
+            self.check(meta.get('tool') == 'query_work_orders' and result.get('total') == expected,
+                       role + ' 待办数量经真实MCP查询且与页面一致')
+            _, _, follow = self.turn(by_role[role]['id'], tokens[name], '那照明的呢', cid)
+            self.check(follow.get('business', {}).get('query', {}).get('category') == 'lighting', role + ' 连续筛选保留业务语境')
+            scenario_evidence.append({'role': role, 'request_id': meta['request_id'], 'business': result})
+        self.evidence['business_scenarios'] = scenario_evidence
         after = self.request('GET', f'/api/work-orders/{order["id"]}', admin)['order']
         self.check(after == order, 'MCP 查询未改变演示工单')
         audit = self.request('GET', '/api/audit?page_size=100', admin)['items']
-        self.check(sum(a['action'] == 'mcp.call' and a['outcome'] == 'success' for a in audit) == 3, '三次 MCP 成功调用均有审计')
+        self.check(sum(a['action'] == 'mcp.call' and a['outcome'] == 'success' and a['request_id'] in {e['request_id'] for e in mcp_evidence} for a in audit) == 3, '三次 MCP 成功调用均有审计')
 
         logs = self.dc('logs', '--no-color', 'api', 'worker', 'mcp', 'web')
         cid = self.dc('ps', '-q', 'web').strip()
@@ -243,18 +259,59 @@ class Verification:
                              embedding_dimension=int(self.gateway['EMBEDDING_DIMENSION']),
                              rag=answers, mcp=mcp_evidence)
 
+    def verify_conversational(self, own, tokens):
+        before = self.request('GET', '/api/work-orders/summary', tokens['requester'])
+        draft_cid, meta, done = self.turn(own, tokens['requester'], '宿舍灯坏了，帮我报修')
+        draft = done.get('draft', {})
+        self.evidence.setdefault('draft_turns', []).append({k: v for k, v in draft.items() if k != 'idempotency_key'})
+        self.check(draft.get('category') == 'lighting' and not draft.get('location')
+                   and '灯' in draft.get('description', ''), '真实模型提取不完整报修草稿，不虚构位置')
+        _, meta, done = self.turn(own, tokens['requester'], '三号楼201，灯完全不亮', draft_cid)
+        draft = done.get('draft', {})
+        self.evidence.setdefault('draft_turns', []).append({k: v for k, v in draft.items() if k != 'idempotency_key'})
+        self.check(draft.get('location') == '三号楼201' and draft.get('category') == 'lighting'
+                   and '灯' in draft.get('description', ''), '真实模型多轮补齐报修字段')
+        self.check(before == self.request('GET', '/api/work-orders/summary', tokens['requester']),
+                   '真实模型对话及草稿不创建工单')
+        draft_path = f'/api/conversations/{draft_cid}/drafts/{draft["message_id"]}'
+        for name in ('requester2', 'other'):
+            self.request('GET', draft_path, tokens[name], status=404)
+        self.check(True, '真实草稿仅会话本人可见')
+        draft = self.request('PUT', draft_path, tokens['requester'],
+                             {**{k: draft[k] for k in ('category', 'location', 'description')},
+                              'description': '灯完全不亮，演示验收', 'version': draft['version'], 'status': 'active'})['draft']
+        body = {**{k: draft[k] for k in ('category', 'location', 'description')},
+                'draft_message_id': draft['message_id'], 'draft_version': draft['version']}
+        confirmed = self.request('POST', '/api/work-orders', tokens['requester'], body, 201,
+                                 {'Idempotency-Key': draft['idempotency_key']})['order']
+        replay = self.request('POST', '/api/work-orders', tokens['requester'], body, 200,
+                              {'Idempotency-Key': draft['idempotency_key']})['order']
+        self.check(confirmed['id'] == replay['id'] and confirmed['number'] == replay['number'],
+                   '真实草稿经正常接口确认后重试仅一份工单')
+        result = self.request('GET', draft_path, tokens['requester'])['draft']
+        self.check(result['status'] == 'submitted' and result['order_number'] == confirmed['number'],
+                   '提交结果恢复为真实工单编号')
+        self.evidence['conversational_repair'] = {'conversation_id': draft_cid, 'request_id': meta['request_id'],
+                                                 'order_id': confirmed['id'], 'order_number': confirmed['number'],
+                                                 'category': draft['category'], 'location': draft['location'],
+                                                 'description': draft['description']}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18085)
+    parser.add_argument('--draft-only', action='store_true', help='Only verify conversational repair against the real gateway')
     args = parser.parse_args()
-    verification = Verification(args.port)
+    verification = Verification(args.port, args.draft_only)
     try:
         verification.verify()
         verification.evidence['result'] = 'passed'
     finally:
         # 只停止本次新建项目；保留虚构数据卷，不接触已有环境。
         verification.dc('down')
+        partial = ROOT / 'tmp' / (verification.project + '.json')
+        partial.parent.mkdir(exist_ok=True)
+        partial.write_text(json.dumps(verification.evidence, ensure_ascii=False, indent=2) + '\n')
     target = ROOT / 'tmp' / (verification.project + '.json')
     target.parent.mkdir(exist_ok=True)
     target.write_text(json.dumps(verification.evidence, ensure_ascii=False, indent=2) + '\n')
