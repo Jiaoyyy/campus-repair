@@ -81,7 +81,7 @@ for token,role in ((requester,'requester'),(tech,'technician'),(admin,'admin')):
 expect(403,req('GET','/api/agents?manage=1',requester),'nonadmin management');expect(403,req('PUT',f'/api/agents/{aid}',requester,a),'nonadmin config');expect(404,req('POST','/api/conversations',requester,{'agent_id':ta['id']}),'wrong role');expect(404,req('PUT',f'/api/agents/{aid}',otheradmin,a),'cross config')
 orders_before=sql("SELECT CONCAT(COUNT(*),':',COALESCE(SUM(version),0)) FROM work_orders")
 m1=upload(admin,'演示：助手照明报修须知','照明报修请填写楼栋、房间、故障现象和发现时间。\n演示资料，不代表校方制度。')
-m2=upload(admin,'演示：安全提醒','照明报修注意安全，发现冒烟请停止使用并联系现场人员。')
+m2=upload(admin,'演示：安全提醒','照明报修注意安全，发现冒烟请停止使用并联系现场人员。不要自行拆卸、接线或带电操作。电路安全提醒，仅供软件验收。')
 secret=upload(admin,'演示：未绑定材料','隧道量子梨花专用资料。不得出现在未绑定助手检索中。')
 foreign=upload(otheradmin,'隔离演示资料','照明报修隔离组织资料。')
 a=configure(aid,enabled=True,material_ids=[m1,m2]);configure(ta['id'],enabled=True,material_ids=[m1]);configure(aa['id'],enabled=True,material_ids=[m1])
@@ -99,6 +99,22 @@ for text in (' ', '灯'*2001):expect(400,req('POST',f'/api/conversations/{c}/mes
 mode('fake');events=turn(c);done=events[-1][1];check('[999]' not in done['answer'] and done['warning'] and len(done['citations'])==1,'invalid citation rejected');check(all('[999]' not in e[1].get('text','') for e in events),'invalid marker never streamed')
 mode('unused');done=turn(c)[-1][1];check(not done['citations'] and done['warning'],'unused candidates are not references')
 mode('unsafe');done=turn(c)[-1][1];check('第一步' not in done['answer'] and not done['citations'],'unsafe steps blocked')
+# Issue #4: a negative safety warning must survive the three-character SSE chunks.
+configure(aid,material_ids=[m2]);mode('safe-warning')
+for question in ('报修需要填写哪些信息？','维修时有哪些安全注意事项？','不要自行拆电路或进行带电操作'):
+ safety_c=create(aid);done=turn(safety_c,question)[-1][1]
+ check(done['answer']=='不要自行拆卸、接线或带电操作。[1]' and len(done['citations'])==1 and not done['warning'],'negative warning retains actual citation')
+ ref=done['citations'][0]
+ check(ref['material_id']==m2,'warning cites authorized safety material')
+ path=f'/api/conversations/{safety_c}/citations/{done["message_id"]}/{ref["chunk_id"]}'
+ original=expect(200,req('GET',path,requester),'safety original')
+ check(original['text'][ref['start']:ref['end']]==ref['text'] and '不要自行' in ref['text'],'safety source exact')
+ saved=messages(safety_c)[-1]
+ check(saved['content']==done['answer'] and saved['citations']==done['citations'],'safety citation persists')
+ expect(404,req('GET',path,requester2),'safety source owner isolation')
+mode('mixed-warning');done=turn(create(aid),'维修时有哪些安全注意事项？')[-1][1]
+check('可以接线' not in done['answer'] and not done['citations'],'mixed dangerous instructions discard citations')
+configure(aid,material_ids=[m1,m2])
 mode('ok');before=len(calls());done=turn(c,'鲸鱼星际维修时限规定')[-1][1];check('无法确认' in done['answer'] and not done['citations'] and len(calls())==before+2,'model handles unverified policy without invented citation')
 # Failed messages and inputs never enter the next completed-history context.
 mode('disconnect');check(turn(c,'照明报修失败上下文不能用')[-1][0]=='error','interruption explicit');history=messages(c);check(history[-1]['status']=='failed' and not history[-1]['content'],'unverified buffered text not published')

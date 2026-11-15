@@ -21,7 +21,7 @@ func containsAny(text string, terms ...string) bool {
 	return false
 }
 func knowledgeQuestion(text string) bool {
-	return containsAny(text, "报修", "维修", "故障", "宿舍", "楼栋", "灯", "电器", "照明", "水管", "漏水", "漏电", "冒烟", "插座", "安全", "校方", "学校", "规定", "须知", "制度", "时限", "资料", "流程", "给排水")
+	return containsAny(text, "报修", "维修", "故障", "宿舍", "楼栋", "灯", "电器", "照明", "水管", "漏水", "漏电", "冒烟", "插座", "安全", "校方", "学校", "规定", "须知", "制度", "时限", "资料", "流程", "给排水", "电路", "带电操作", "带电维修")
 }
 func evidenceQuestion(text string) bool {
 	return containsAny(text, "规定", "制度", "校方", "学校", "时限", "多久", "几天", "几小时", "安全", "需要", "要求", "流程", "根据资料")
@@ -101,7 +101,7 @@ func assistantContextNote(role, input string, history []chatMessage, knowledge a
 	note := map[string]string{
 		"not_requested": "本轮无需查询资料。正常回应用户，不要无故提及缺少资料。",
 		"empty":         "本轮已查询授权资料但没有相关命中。仍应正常交流、解释通用报修操作或追问故障信息；只有涉及校方事实时说明无法确认，禁止伪造出处。",
-		"found":         "本轮有授权资料，只有实际使用某片段内容才引用其编号。追问和普通交流不必强行引用。",
+		"found":         "本轮有授权资料。使用或转述片段的事实、安全提醒或报修要求时，必须在对应句末输出该片段的 citation 标记；不能只复述内容却省略来源。未使用的片段不能引用，追问和普通交流不必强行引用。",
 		"degraded":      "部分检索能力不可用，已回退到可用文字资料。只使用实际提供的片段，不能宣称完整资料均已核实。",
 		"unavailable":   "本轮资料查询失败。明确说明资料暂不可用，仍可继续交流、追问位置和现象；禁止将失败描述为未找到制度或虚构校方事实。",
 	}[knowledge.State]
