@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -88,5 +89,48 @@ func TestConversationContextSelection(t *testing.T) {
 	}
 	if !strings.Contains(messages[0].Content, "不能创建工单") || !strings.Contains(messages[0].Content, "不编造位置") {
 		t.Fatal("read-only and missing-information constraints absent")
+	}
+}
+
+func TestSafetyWarningReferences(t *testing.T) {
+	for _, text := range []string{
+		"不要自行拆卸、接线或带电操作。[1]",
+		"请远离故障区域。[1]不要自行拆卸、接线或带电维修。[1]",
+		"请勿拆开配电箱。[1]", "严禁带电维修[2]。",
+		"发现冒烟请停止使用；不要自行拆卸、接线或带电维修。[1]",
+		"不要自行拆电路或进行带电操作", safeAnswer,
+	} {
+		if unsafeAnswer(text) {
+			t.Errorf("prohibition blocked: %s", text)
+		}
+	}
+	for _, text := range []string{
+		"不要拆卸，但可以接线。", "并非不要接线。", "不要不接线。",
+		"不要先拆卸再接线。", "不要犹豫，拆开配电箱。",
+		"不要拆卸、然后接线。", "不要拆卸或尝试接线。",
+		"不要拆卸，接线即可。", "可以带电维修。", "拆电路。",
+		"不要拆卸[1]然后接线", "如果不要拆卸就接线。",
+	} {
+		if !unsafeAnswer(text) {
+			t.Errorf("unsafe instructions accepted: %s", text)
+		}
+	}
+	if knowledgeQuery("不要自行拆电路或进行带电操作", nil) == "" {
+		t.Fatal("standalone electrical safety query skipped retrieval")
+	}
+}
+
+func TestNumberedEvidencePrompt(t *testing.T) {
+	messages := buildChatMessages(Agent{}, nil, "维修安全", []Evidence{{ID: 80, MaterialID: 42, Chunk: Chunk{Text: "禁止带电维修。"}}, {ID: 90, MaterialID: 43, Chunk: Chunk{Text: "停止使用。"}}}, "")
+	raw := strings.SplitN(messages[1].Content, "：", 2)[1]
+	var entries []struct {
+		Citation string `json:"citation"`
+		Evidence
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Citation != "[1]" || entries[1].Citation != "[2]" || entries[0].ID != 80 || entries[0].Text != "禁止带电维修。" {
+		t.Fatal("citation labels must match candidate order, not database IDs")
 	}
 }

@@ -110,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
    answer='{oops' if mode=='draft-invalid' else json.dumps(draft,ensure_ascii=False)
   elif mode=='false-business':answer='目前没有查询到研发楼近期的故障报修记录。'
   elif mode=='unsafe':answer='第一步拆开配电箱并接线。'
+  elif mode=='safe-warning':answer='不要自行拆卸、接线或带电操作。[1]'
+  elif mode=='mixed-warning':answer='不要拆卸，但可以接线。[1]'
   elif mode=='fake':answer='报修需要填写位置。[999] 也要描述故障现象。[1]'
   elif mode=='unused':answer='请填写具体位置。'
   elif '鲸鱼' in question:answer='当前资料无法确认这项校方维修时限，请向后勤核实。'
