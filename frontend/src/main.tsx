@@ -18,6 +18,19 @@ import { Assistant } from './Assistant';
 import { AgentSettings } from './AgentSettings';
 import { Drawer, Icon, Loading, PageHeading } from './ui';
 
+// Bottom tabs are only mounted on narrow viewports, so desktop keeps the
+// existing sidebar markup and the DOM stays free of duplicate navigation.
+function useCompactLayout() {
+  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 800px)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 800px)');
+    const onChange = () => setCompact(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return compact;
+}
+
 function Badge({ status }: { status: string }) { return <span className={`badge ${status}`}>{statusNames[status] || '状态待确认'}</span>; }
 function ErrorMessage({ text }: { text: string }) { return text ? <div className="error" role="alert">{text}</div> : null; }
 
@@ -188,6 +201,7 @@ function Audit({ onOpen }: { onOpen: (id: number) => void }) {
 
 function App() {
   const [u, setU] = useState<User | null>(null), [checking, setChecking] = useState(!!sessionStorage.getItem(tokenKey)), [message, setMessage] = useState('');
+  const compact = useCompactLayout();
   const [menuOpen, setMenuOpen] = useState(false), [draftDirty,setDraftDirty]=useState(false), [visitDirty,setVisitDirty]=useState(false), [settingsDirty,setSettingsDirty]=useState(false), [createDirty,setCreateDirty]=useState(false);
   const navigation=useNavigation(u?.role || null, draftDirty || visitDirty || settingsDirty || createDirty);
   const {view,id:selected,from,section}=navigation.route;
@@ -228,6 +242,12 @@ function App() {
   const sectionView=view==='detail'?parent:view;
   const activeView=u.role==='admin'&&sectionView==='workbench'?'list':sectionView;
   const navItem=(key:View,label:string,icon:string)=><button className={activeView===key?'active':''} aria-current={activeView===key?'page':undefined} onClick={()=>navigate(key)}><Icon kind={icon}/><span>{label}</span></button>;
+  const mobileTabs:{key:View;label:string;icon:string}[]=u.role==='requester'
+    ?[{key:'list',label:'我的报修',icon:'orders'},{key:'create',label:'新建报修',icon:'plus'},{key:'assistant',label:'报修助手',icon:'chat'}]
+    :u.role==='technician'
+    ?[{key:'workbench',label:'工作台',icon:'tool'},{key:'list',label:'我的任务',icon:'orders'},{key:'assistant',label:'报修助手',icon:'chat'}]
+    :[{key:'list',label:'报修管理',icon:'orders'},{key:'workbench',label:'上门异常',icon:'tool'},{key:'assistant',label:'报修助手',icon:'chat'},{key:'knowledge',label:'知识库',icon:'book'}];
+
   return <div className={`app-shell ${view==='assistant'?'assistant-mode':''}`} key={u.id}>
     <a className="skip-link" href="#main-content" onClick={e=>{e.preventDefault();content.current?.focus();}}>跳到主要内容</a>
     {menuOpen&&<button className="nav-backdrop" aria-label="关闭导航" onClick={()=>setMenuOpen(false)}/>}
@@ -245,6 +265,6 @@ function App() {
       {visited.has('assistant')&&<div className="assistant-page" hidden={view!=='assistant'}><Assistant role={u.role} active={view==='assistant'} onManual={()=>navigate('list')} onOpen={open} onDirtyChange={setDraftDirty} storageKey={`campus-assistant-${u.id}`} discardSignal={assistantDiscard}/></div>}
       {view==='agents'&&u.role==='admin'&&<AgentSettings onDirtyChange={setSettingsDirty}/>}
       {view==='audit'&&u.role==='admin'&&<Audit onOpen={open}/>}
-    </main></div>{navigation.pending&&<Drawer title="有未保存的更改" onClose={navigation.cancel}><p>离开将放弃尚未保存的编辑。正在生成或提交时，请等待完成后继续。</p><div className="drawer-actions"><button onClick={navigation.cancel}>继续编辑</button><button className="danger" onClick={()=>{if(draftDirty)setAssistantDiscard(v=>v+1);clearDirty();navigation.proceed();}}>放弃更改并继续</button></div></Drawer>}</div>;
+    </main>{compact&&<nav className="mobile-tabs" aria-label="快速导航">{mobileTabs.map(item=><button key={item.key} className={sectionView===item.key?'active':''} aria-current={sectionView===item.key?'page':undefined} onClick={()=>navigate(item.key)}><Icon kind={item.icon}/><span>{item.label}</span></button>)}</nav>}</div>{navigation.pending&&<Drawer title="有未保存的更改" onClose={navigation.cancel}><p>离开将放弃尚未保存的编辑。正在生成或提交时，请等待完成后继续。</p><div className="drawer-actions"><button onClick={navigation.cancel}>继续编辑</button><button className="danger" onClick={()=>{if(draftDirty)setAssistantDiscard(v=>v+1);clearDirty();navigation.proceed();}}>放弃更改并继续</button></div></Drawer>}</div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
