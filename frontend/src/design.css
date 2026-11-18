@@ -317,3 +317,231 @@ td { padding: 16px 20px; }
 .insight-fact-details>div { margin-block: 12px; }
 .insight-fact-details dt { font-weight: 600; margin-bottom: 4px; }
 .insight-fact-details dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+
+/* ─────────────────────────────────────────────────────────────
+   视觉打磨 2026-11-18
+   在 MASTER.md 既有 tokens 内做精细化：更清晰的层级、更安静的表面、
+   更一致的控件尺寸。不新增语义色，不引入外部字体。
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --elev-1: 0 1px 2px #142f2708, 0 1px 3px #142f2705;
+  --elev-2: 0 6px 20px #142f2714;
+  --ring: 0 0 0 3px #16664b1f;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body { letter-spacing: .1px; }
+h1 { font-weight: 700; letter-spacing: -.7px; line-height: 1.22; }
+h2, h3 { font-weight: 650; letter-spacing: -.2px; }
+.muted, .field-help, .small { line-height: 1.65; }
+
+/* 顶栏：滚动时保持可见，用半透明背景减少割裂 */
+.app-header {
+  position: sticky; top: 0; z-index: 15;
+  background: #ffffffd9; backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.header-path { font-size: 13px; color: var(--muted); }
+.header-path strong { color: var(--ink); }
+.workspace main { padding: 28px 28px 56px; max-width: 1440px; }
+
+/* 侧栏：加深层级、拉开分组间距 */
+.sidebar { background: linear-gradient(180deg, #16332a 0%, #122a23 100%); }
+.sidebar nav button { border-radius: 10px; font-weight: 500; }
+.sidebar nav button svg { opacity: .85; }
+.sidebar nav button.active svg { opacity: 1; }
+.sidebar nav button.active { box-shadow: inset 0 1px 0 #ffffff14; }
+.sidebar-label { text-transform: none; letter-spacing: 1.2px; }
+.sidebar-bottom { border-top: 1px solid #ffffff14; }
+
+/* 页头 */
+.page-heading { margin-bottom: 22px; }
+.page-heading p { color: var(--muted); max-width: 62ch; }
+.page-symbol { width: 46px; height: 46px; background: linear-gradient(180deg,#f2f8f4,#e9f3ed); border-color: #d3e4d9; }
+.heading-actions button { min-height: 44px; border-radius: 9px; }
+
+/* 待办提示条 */
+.work-priority {
+  border-radius: 14px; padding: 18px 22px; margin-bottom: 18px;
+  background: linear-gradient(180deg,#eef7f1,#e8f3ec);
+  border: 1px solid #cfe3d6; box-shadow: var(--elev-1);
+}
+.work-priority h2 { font-size: 20px; letter-spacing: -.3px; }
+
+/* 概览分段面板 */
+.overview { border-radius: 14px; box-shadow: var(--elev-1); overflow: hidden; margin-bottom: 18px; }
+.overview-card { min-height: 84px; padding: 18px 22px; transition: background-color 160ms, color 160ms; }
+.overview-card:hover { background: #f8fbf9; }
+.overview-card>strong { font-size: 30px; font-weight: 700; letter-spacing: -1.2px; }
+.overview-card>span { font-size: 13px; font-weight: 550; }
+.overview-card>small { font-size: 11.5px; color: var(--subtle); }
+.overview-card.chosen { background: linear-gradient(180deg,#eff8f2,#eaf4ee); }
+.overview-card.chosen:after { height: 3px; left: 22px; right: 22px; }
+
+/* 卡片与列表 */
+.panel { border-radius: 14px; box-shadow: var(--elev-1); border-color: #e3ebe6; }
+.list-panel { padding: 0; }
+.list-title { min-height: 60px; padding-inline: 22px; }
+.list-title h2, .list-title h3 { margin: 0; font-size: 16px; }
+.filters { padding: 16px 22px; background: #fcfdfc; }
+.filters input, .filters .select-trigger { border-radius: 9px; }
+th { padding: 11px 22px; background: #f9fbfa; font-size: 11.5px; letter-spacing: .4px; font-weight: 600; color: #6b7f73; }
+td { padding: 17px 22px; }
+tbody tr { transition: background-color 140ms; }
+tbody tr:hover { background: #f8fbf9; }
+.order-link { font-size: 15px; font-weight: 600; letter-spacing: -.1px; }
+.order-excerpt { max-width: 46ch; font-size: 13px; }
+.order-number { font-size: 11.5px; color: #7c8d83; font-variant-numeric: tabular-nums; }
+.row-action {
+  border: 1px solid #c3d6c9; background: #f4faf6; color: var(--brand);
+  padding: 8px 14px; border-radius: 9px; min-height: 40px; font-size: 13px; font-weight: 550;
+}
+.row-action:hover { background: #e9f4ee; border-color: var(--brand); }
+
+/* 状态标签：统一为药丸，色相对齐语义色 */
+.badge { border-radius: 999px; padding: 4px 10px 4px 9px; font-size: 12px; font-weight: 600; letter-spacing: .1px; }
+.badge:before { width: 6px; height: 6px; }
+.badge.submitted, .badge.needs_info { background: #fdf3e2; color: #7d5714; }
+.badge.unassigned, .badge.assigned { background: #eaf1fb; color: #2f5787; }
+.badge.in_progress { background: #e8f4ec; color: #17624a; }
+.badge.awaiting_confirmation { background: #f1ecfa; color: #684a92; }
+.badge.closed { background: #e9f3ee; color: #2c6a4d; }
+.badge.cancelled { background: #f0f2f1; color: #5f6f66; }
+.badge.rejected { background: #fbedeb; color: #97362c; }
+
+/* 控件尺寸与焦点 */
+button { border-radius: 9px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, .select-trigger:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 2px; box-shadow: var(--ring);
+}
+input, textarea, .select-trigger { border-radius: 9px; min-height: 42px; }
+button.primary { box-shadow: 0 1px 2px #142f271a; }
+
+/* 维修工作台卡片 */
+.workbench-cards { gap: 16px; }
+.workbench-card {
+  padding: 20px 20px 18px; border-radius: 14px; border-color: #e3ebe6;
+  box-shadow: var(--elev-1); transition: box-shadow 160ms, border-color 160ms;
+}
+.workbench-card:hover { box-shadow: var(--elev-2); border-color: #cdded3; }
+.workbench-card h3, .workbench-card .section-heading { line-height: 1.45; }
+.workbench-card .section-heading { align-items: flex-start; gap: 10px; }
+.workbench-card .badge { flex-shrink: 0; }
+.workbench-card button.primary { width: 100%; min-height: 44px; margin-top: 4px; }
+
+/* 助手 */
+.assistant-layout { gap: 18px; }
+.chat-panel { border-radius: 14px; box-shadow: var(--elev-1); overflow: hidden; }
+.chat-toolbar { background: #fbfdfb; border-bottom: 1px solid var(--line); }
+.conversation-list { padding: 10px; gap: 2px; }
+.conversation-item { border-radius: 10px; padding: 13px 12px; }
+.conversation-item:hover { background: #f6faf7; }
+.conversation-item.selected { background: var(--brand-soft); border-color: #cfe3d6; }
+.chat-empty h2 { font-size: 24px; letter-spacing: -.5px; }
+.suggested-questions button {
+  border-radius: 12px; min-height: 58px; background: #fcfdfc;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left;
+}
+.suggested-questions button:hover { border-color: #b9cebf; background: #f4faf6; box-shadow: var(--elev-1); }
+.chat-message { border-radius: 14px; padding: 14px 16px; line-height: 1.72; }
+.chat-message.user { background: linear-gradient(180deg,#eef7f1,#e8f4ee); border-color: #d3e6da; }
+.chat-composer { border-radius: 14px; padding: 12px 14px; background: #fff; box-shadow: var(--elev-1); }
+.chat-composer:focus-within { border-color: var(--brand); box-shadow: var(--ring); }
+.chat-composer button { min-height: 42px; border-radius: 10px; }
+
+/* 空态与加载 */
+.empty { padding: 44px 24px; text-align: center; color: var(--muted); }
+.empty h3 { color: var(--ink); margin-bottom: 6px; }
+.empty-icon { width: 52px; height: 52px; border-radius: 14px; background: #f1f7f3; color: var(--brand); }
+.loading { color: var(--muted); font-size: 13px; }
+
+/* 登录页 */
+.login { background: radial-gradient(1200px 600px at 15% -10%, #e8f3ec 0%, #f3f6f4 55%, #f3f6f4 100%); }
+.login-form { border-radius: 16px; box-shadow: var(--elev-2); }
+
+/* 手机端 */
+@media (max-width: 800px) {
+  .workspace main { padding: 16px 14px 48px; }
+  .app-header { height: 58px; padding-inline: 14px; }
+  button, .row-action, .select-trigger, input, textarea { min-height: 44px; }
+  .sidebar nav button { min-height: 48px; }
+  .page-heading { gap: 12px; }
+  .heading-actions button { width: 100%; }
+  .work-priority { padding: 16px; flex-wrap: wrap; gap: 12px; }
+  .work-priority button.primary { width: 100%; }
+  .overview { display: grid; grid-template-columns: 1fr 1fr; }
+  .overview-card { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); min-height: 78px; padding: 14px 16px; }
+  .overview-card:nth-child(2n) { border-right: 0; }
+  .overview-card:nth-last-child(-n+2) { border-bottom: 0; }
+  .overview-card:first-child { border-radius: 13px 0 0 0; }
+  .overview-card:nth-child(2) { border-radius: 0 13px 0 0; }
+  .overview-card:nth-last-child(2) { border-radius: 0 0 0 13px; }
+  .overview-card:last-child { border-radius: 0 0 13px 0; }
+  .overview-card>strong { font-size: 26px; }
+  .filters { padding: 14px 16px; }
+  .filters input { max-width: none; flex: 1 1 100%; }
+  .filters select, .filters .select-control { flex: 1 1 0; width: auto; min-width: 0; }
+  .mobile-orders .order-card, .mobile-orders > div { padding: 16px; }
+  .row-action { width: 100%; justify-content: space-between; }
+  .suggested-questions { grid-template-columns: 1fr; }
+  .chat-composer { margin: 0 12px 12px; }
+  .chat-messages { padding-inline: 14px; }
+  .workbench-cards { grid-template-columns: 1fr; }
+}
+
+/* 工作台卡片：把上门信息与故障描述分开 */
+.workbench-card > strong {
+  display: block; margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--brand);
+}
+.workbench-card > p { margin-bottom: 6px; font-size: 13.5px; }
+.workbench-card > p.muted { font-size: 12px; color: #6f8177; }
+.workbench-card .section-heading h3 { font-size: 15.5px; }
+.workbench-card .visit-reason { color: var(--danger); background: var(--danger-soft); padding: 6px 10px; border-radius: 8px; }
+
+@media (max-width: 800px) {
+  .overview-card.chosen:after { display: none; }
+  .overview-card.chosen { box-shadow: inset 0 -2px 0 var(--brand); }
+  .page-heading { margin-bottom: 18px; }
+  .page-heading h1 { font-size: 24px; }
+}
+
+/* 助手空态垂直居中，减少大片空白 */
+.chat-messages:has(.chat-empty) { display: flex; flex-direction: column; justify-content: center; }
+.chat-empty { max-width: 620px; }
+.chat-panel .conversation-item + .conversation-item { border-top: 1px solid var(--line); border-radius: 0; }
+.conversation-item.selected, .conversation-item.selected + .conversation-item { border-top-color: transparent; }
+
+/* 上门异常卡片与容器分层，避免双层描边 */
+.visit-issue-card { background: #fcfdfc; border-color: var(--line); box-shadow: none; }
+.visit-issue-card:hover { background: #fff; }
+.visit-issue-list { gap: 12px; }
+
+/* 管理页签 */
+.management-tabs { border-bottom: 1px solid var(--border); gap: 28px; }
+.management-tabs button { font-size: 14px; padding: 12px 0; }
+
+/* 知识库材料行 */
+.material-row { border-radius: 12px; }
+.knowledge-materials .material-row:hover { background: #f8fbf9; }
+
+/* 桌面端也保证主要按钮的点击区域不小于 44px（视觉密度不变，只加高度） */
+@media (min-width: 801px) {
+  .app-header button, .header-path button, .back-button, .detail-toolbar button,
+  .form-actions button, .compact-order-actions button, .heading-actions button,
+  .drawer-actions button, .settings-savebar button { min-height: 44px; }
+  .list-title > button { min-height: 36px; }
+}
+
+/* 历史快照说明 */
+.history-note {
+  margin: 0 0 8px; padding: 0 4px;
+  font-size: 12px; line-height: 1.6; color: var(--muted);
+}
+.snapshot-banner {
+  margin: 4px 24px 0; padding: 8px 12px;
+  background: #fdf6e7; border: 1px solid #efdfbe; border-radius: 9px; color: #7a5a17;
+}
+@media (max-width: 800px) {
+  .snapshot-banner { margin: 4px 14px 0; }
+}
