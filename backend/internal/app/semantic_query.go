@@ -82,6 +82,12 @@ func queryPlanTools() []any {
 }
 
 func (g ChatGateway) planQuery(ctx context.Context, role string, history []chatMessage, input string, previous *BusinessResult, draft *RepairDraft, bound ...[]string) (queryPlan, error) {
+	if start, end, reversed := reversedExplicitDates(input); reversed {
+		return queryPlan{}, &queryPlanRejected{
+			Code:    "date_range_reversed",
+			Message: "提问里的起止日期是倒的（先 " + start + "，后 " + end + "），本轮没有查询。请确认开始和结束日期后重新提问。",
+		}
+	}
 	previousJSON, _ := json.Marshal(previous)
 	windowContext := "无上次日期范围"
 	if previous != nil && (previous.Kind == "orders" || previous.Kind == "analysis") && (previous.Query.Period != "" && previous.Query.Period != "all" || previous.Query.DateFrom != "") {
@@ -221,9 +227,134 @@ func (g ChatGateway) planQuery(ctx context.Context, role string, history []chatM
 		}
 		q = groundQueryDates(q, input, previous)
 		q = groundAnalysisQuery(q, input, previous)
+		q = groundFollowUp(q, input, previous)
+		q = groundQueryStatus(q, input)
 		plan.Arguments, _ = json.Marshal(q)
 	}
 	return plan, nil
+}
+
+// Explicit Chinese status words in the user's own sentence override the model's
+// choice. The planner maps 待接单/待派单/待审核 inconsistently across runs, which
+// silently returns a different queue than the user asked for.
+var statusWords = []struct {
+	word   string
+	status string
+}{
+	{"待确认", "awaiting_confirmation"},
+	{"待接单", "assigned"},
+	{"待派单", "unassigned"},
+	{"待审核", "submitted"},
+	{"待补充", "needs_info"},
+	{"处理中", "in_progress"},
+	{"已关闭", "closed"},
+	{"已驳回", "rejected"},
+	{"已取消", "cancelled"},
+}
+
+// Only rewrite when the question asks for a count or a list; "待接单怎么处理"
+// is a how-to question and must keep going to the ordinary chat path.
+var statusQuestionHint = regexp.MustCompile(`多少|几个|几条|几单|哪些|哪几张|数量|统计|有没有|是否有`)
+
+func groundQueryStatus(q OrderQuery, input string) OrderQuery {
+	if !statusQuestionHint.MatchString(input) {
+		return q
+	}
+	for _, item := range statusWords {
+		if !strings.Contains(input, item.word) {
+			continue
+		}
+		q.Status = item.status
+		// A single explicit status already defines the scope; a stale queue
+		// from the previous turn would narrow it to a different set.
+		q.Queue = "all"
+		return q
+	}
+	// "有哪些单等我审核" names the queue implicitly; the planner often reads
+	// 审核 as 待确认, which drops the whole result set.
+	if containsAny(input, "等我审核", "待我审核", "要我审核", "需要我审核", "需要审核") {
+		q.Status = "submitted"
+		q.Queue = "all"
+	}
+	return q
+}
+
+// The model rewrites "从 11-20 到 11-01" into an ordered range and answers as if
+// the user asked that. Detect the reversal in the raw sentence and refuse.
+var explicitDatePattern = regexp.MustCompile(`(20[0-9]{2})[-/年]([01]?[0-9])[-/月]([0-3]?[0-9])日?`)
+
+func reversedExplicitDates(input string) (string, string, bool) {
+	matches := explicitDatePattern.FindAllStringSubmatch(input, -1)
+	if len(matches) < 2 {
+		return "", "", false
+	}
+	toDate := func(m []string) string {
+		month, day := m[2], m[3]
+		if len(month) == 1 {
+			month = "0" + month
+		}
+		if len(day) == 1 {
+			day = "0" + day
+		}
+		return m[1] + "-" + month + "-" + day
+	}
+	first, second := toDate(matches[0]), toDate(matches[1])
+	parse := func(v string) (time.Time, bool) {
+		d, err := time.Parse("2006-01-02", v)
+		return d, err == nil
+	}
+	a, okA := parse(first)
+	b, okB := parse(second)
+	if !okA || !okB || !b.Before(a) {
+		return "", "", false
+	}
+	return first, second, true
+}
+
+// queryPlanRejected carries a user-facing reason for plans the server refuses
+// to execute, so the reply can explain the problem instead of a generic failure.
+type queryPlanRejected struct {
+	Code    string
+	Message string
+}
+
+func (e *queryPlanRejected) Error() string { return e.Code }
+
+// Short follow-ups such as "那照明的呢" or "只看漏水" change one dimension and
+// keep the rest. The planner drops the untouched filters often enough that the
+// previous turn's location/queue has to be restored explicitly.
+func isShortFollowUp(input string) bool {
+	text := strings.TrimSpace(input)
+	if text == "" {
+		return false
+	}
+	if len([]rune(text)) > 16 {
+		return false
+	}
+	return true
+}
+
+func groundFollowUp(q OrderQuery, input string, previous *BusinessResult) OrderQuery {
+	if previous == nil || previous.Kind != "orders" || !isShortFollowUp(input) {
+		return q
+	}
+	if containsAny(input, "全部类别", "所有类别", "不限类别") {
+		q.Category = ""
+		if q.Location == "" {
+			q.Location = previous.Query.Location
+		}
+		if q.Queue == "" {
+			q.Queue = previous.Query.Queue
+		}
+		return q
+	}
+	if q.Location == "" && !containsAny(input, "全部", "所有") {
+		q.Location = previous.Query.Location
+	}
+	if q.Queue == "" {
+		q.Queue = previous.Query.Queue
+	}
+	return q
 }
 
 var queryTimeMention = regexp.MustCompile(`最近|近期|近来|过去|此前|今天|今日|昨天|昨日|前天|本周|这周|上周|下周|星期|礼拜|周[一二三四五六日天]|本月|上月|个月|本年|今年|去年|之前|以前|往前|一周|七天|7天|` +
