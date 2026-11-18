@@ -524,3 +524,24 @@ button.primary { box-shadow: 0 1px 2px #142f271a; }
 /* 知识库材料行 */
 .material-row { border-radius: 12px; }
 .knowledge-materials .material-row:hover { background: #f8fbf9; }
+
+/* 桌面端也保证主要按钮的点击区域不小于 44px（视觉密度不变，只加高度） */
+@media (min-width: 801px) {
+  .app-header button, .header-path button, .back-button, .detail-toolbar button,
+  .form-actions button, .compact-order-actions button, .heading-actions button,
+  .drawer-actions button, .settings-savebar button { min-height: 44px; }
+  .list-title > button { min-height: 36px; }
+}
+
+/* 历史快照说明 */
+.history-note {
+  margin: 0 0 8px; padding: 0 4px;
+  font-size: 12px; line-height: 1.6; color: var(--muted);
+}
+.snapshot-banner {
+  margin: 4px 24px 0; padding: 8px 12px;
+  background: #fdf6e7; border: 1px solid #efdfbe; border-radius: 9px; color: #7a5a17;
+}
+@media (max-width: 800px) {
+  .snapshot-banner { margin: 4px 14px 0; }
+}
