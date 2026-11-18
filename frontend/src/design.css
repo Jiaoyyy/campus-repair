@@ -545,3 +545,24 @@ button.primary { box-shadow: 0 1px 2px #142f271a; }
 @media (max-width: 800px) {
   .snapshot-banner { margin: 4px 14px 0; }
 }
+
+/* 手机底部标签栏：减少「打开菜单→选页」的两步操作 */
+.mobile-tabs { display: none; }
+@media (max-width: 800px) {
+  .mobile-tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 18;
+    display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+    gap: 2px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    background: #fffffff2; backdrop-filter: saturate(180%) blur(12px);
+    border-top: 1px solid var(--border);
+  }
+  .mobile-tabs button {
+    flex-direction: column; gap: 3px; min-height: 52px; padding: 6px 4px;
+    border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 500;
+  }
+  .mobile-tabs button svg { width: 20px; height: 20px; }
+  .mobile-tabs button.active { color: var(--brand); font-weight: 650; }
+  .mobile-tabs button.active svg { transform: translateY(-1px); }
+  .workspace main { padding-bottom: 84px; }
+  .chat-composer { margin-bottom: 66px; }
+}
