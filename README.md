@@ -65,7 +65,7 @@ npm run dev
 开发代理固定到本机 18083；修改服务端口时同步调整 vite.config.ts。前端构建为 `npm run build`。后台 Go 模块可以用已安装 Go 运行 `go test ./...`；主机没有 Go 时可用容器：
 
 ```sh
-docker run --rm -v "$PWD/backend:/src" -w /src golang:1.24-alpine sh -c 'go test ./... && go vet ./...'
+docker run --rm -v "$PWD/backend:/src" -w /src golang:1.26-alpine sh -c 'go test ./... && go vet ./...'
 ```
 
 运行 API 成功/失败路径测试：
