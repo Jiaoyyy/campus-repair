@@ -296,6 +296,11 @@ func (s *Server) messageStream(w http.ResponseWriter, r *http.Request) {
 		plan, planErr := g.planQuery(ctx, u.Role, turn.History, input.Content, previousResult, previous, bindings)
 		if planErr != nil {
 			log.Printf("query plan failed request=%s reason=%v", requestID(r), planErr)
+			var rejected *queryPlanRejected
+			if errors.As(planErr, &rejected) {
+				terminate(rejected.Code, rejected.Message)
+				return
+			}
 			var gatewayErr *queryGatewayError
 			if errors.As(planErr, &gatewayErr) {
 				if gatewayErr.Quota {

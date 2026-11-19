@@ -249,3 +249,128 @@ func TestQueryTransportDiagnosticRedaction(t *testing.T) {
 		}
 	}
 }
+
+func TestGroundQueryStatus(t *testing.T) {
+	cases := []struct {
+		input  string
+		want   string
+		queue  string
+		status string
+	}{
+		{"现在有多少待接单工单", "assigned", "", "assigned"},
+		{"有哪些单等我审核", "submitted", "", "submitted"},
+		{"还有多少待派单的", "unassigned", "", "unassigned"},
+		{"当前处理中的有几单", "in_progress", "", "in_progress"},
+		{"已关闭的有多少", "closed", "", "closed"},
+		{"待接单的工单要怎么处理", "", "", ""},
+		{"研发楼有什么问题", "", "", ""},
+	}
+	for _, c := range cases {
+		q := groundQueryStatus(OrderQuery{Queue: c.queue, Status: c.status}, c.input)
+		if q.Status != c.want {
+			t.Errorf("%q: status=%q want %q", c.input, q.Status, c.want)
+		}
+		if c.want != "" && q.Queue != "all" {
+			t.Errorf("%q: queue=%q want all after explicit status", c.input, q.Queue)
+		}
+	}
+}
+
+func TestReversedExplicitDates(t *testing.T) {
+	cases := []struct {
+		input    string
+		reversed bool
+		from     string
+		to       string
+	}{
+		{"查研发楼从2026-11-20到2026-11-01的报修", true, "2026-11-20", "2026-11-01"},
+		{"查研发楼2026-11-01到2026-11-20的报修", false, "", ""},
+		{"查2026年11月1日的报修", false, "", ""},
+		{"研发楼最近有什么故障", false, "", ""},
+	}
+	for _, c := range cases {
+		from, to, reversed := reversedExplicitDates(c.input)
+		if reversed != c.reversed || from != c.from || to != c.to {
+			t.Errorf("%q: got (%q,%q,%v) want (%q,%q,%v)", c.input, from, to, reversed, c.from, c.to, c.reversed)
+		}
+	}
+}
+
+func TestGroundFollowUpKeepsFilters(t *testing.T) {
+	previous := &BusinessResult{Kind: "orders", Query: OrderQuery{Location: "研发楼", Queue: "action", Period: "recent"}}
+	q := groundFollowUp(OrderQuery{Keyword: "漏水"}, "只看漏水", previous)
+	if q.Location != "研发楼" || q.Queue != "action" {
+		t.Fatalf("follow-up lost filters: %+v", q)
+	}
+	cleared := groundFollowUp(OrderQuery{Category: "lighting"}, "全部类别", previous)
+	if cleared.Category != "" || cleared.Queue != "action" || cleared.Location != "研发楼" {
+		t.Fatalf("全部类别 not handled: %+v", cleared)
+	}
+	fresh := groundFollowUp(OrderQuery{Keyword: "漏水"}, "帮我看看教学楼最近一个月有哪些漏水报修记录", previous)
+	if fresh.Location != "" {
+		t.Fatalf("long independent question inherited location: %+v", fresh)
+	}
+}
+
+// The planner maps 待接单 onto unassigned in some runs. The server-side grounding
+// must override that before the MCP call, without retrying the model.
+func TestPlanOverridesMistakenStatus(t *testing.T) {
+	cases := []struct {
+		input   string
+		planned string
+		want    string
+	}{
+		{"现在有多少待接单工单", `{"queue":"action","status":"unassigned","period":"all"}`, "assigned"},
+		{"有哪些单等我审核", `{"queue":"action","status":"awaiting_confirmation","period":"all"}`, "submitted"},
+		{"还有多少待派单的", `{"status":"assigned"}`, "unassigned"},
+	}
+	for _, c := range cases {
+		t.Run(c.input, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				half := len(c.planned) / 2
+				for i, part := range []string{c.planned[:half], c.planned[half:]} {
+					call := map[string]any{"index": 0, "function": map[string]any{"arguments": part}}
+					if i == 0 {
+						call["id"] = "call_1"
+						call["type"] = "function"
+						call["function"].(map[string]any)["name"] = MCPQueryOrders
+					}
+					b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{call}}}}})
+					fmt.Fprintf(w, "data: %s\n\n", b)
+				}
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			}))
+			defer server.Close()
+			g := ChatGateway{URL: server.URL, Key: "fixture", Model: "fixture", Timeout: time.Second}
+			plan, err := g.planQuery(context.Background(), "admin", nil, c.input, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var q OrderQuery
+			if json.Unmarshal(plan.Arguments, &q) != nil {
+				t.Fatal("bad arguments")
+			}
+			if q.Status != c.want || q.Queue != "all" {
+				t.Fatalf("status=%q queue=%q, want %q/all", q.Status, q.Queue, c.want)
+			}
+		})
+	}
+}
+
+// A reversed explicit range must be refused before any model call, so the user
+// gets a reason instead of a silently reordered result set.
+func TestPlanRejectsReversedDatesBeforeGateway(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer server.Close()
+	g := ChatGateway{URL: server.URL, Key: "fixture", Model: "fixture", Timeout: time.Second}
+	_, err := g.planQuery(context.Background(), "admin", nil, "查研发楼从2026-11-20到2026-11-01的报修", nil, nil)
+	var rejected *queryPlanRejected
+	if !errors.As(err, &rejected) || rejected.Code != "date_range_reversed" {
+		t.Fatalf("expected date_range_reversed, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("gateway called %d times", calls)
+	}
+}
