@@ -10,14 +10,15 @@ import (
 )
 
 type Agent struct {
-	ID        int64    `json:"id"`
-	Name      string   `json:"name"`
-	Role      string   `json:"role"`
-	Prompt    string   `json:"prompt,omitempty"`
-	Enabled   bool     `json:"enabled"`
-	Version   int64    `json:"version"`
-	Materials []int64  `json:"material_ids"`
-	Tools     []string `json:"tool_names,omitempty"`
+	ID        int64          `json:"id"`
+	Name      string         `json:"name"`
+	Role      string         `json:"role"`
+	Prompt    string         `json:"prompt,omitempty"`
+	Enabled   bool           `json:"enabled"`
+	Version   int64          `json:"version"`
+	Materials []int64        `json:"material_ids"`
+	Tools     []string       `json:"tool_names,omitempty"`
+	Skills    []SkillBinding `json:"skill_bindings"`
 }
 
 const agentColumns = "id,name,role,prompt,enabled,version"
@@ -123,6 +124,11 @@ func (s *Server) agents(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, err)
 				return
 			}
+			items[i].Skills, err = loadSkillBindings(r.Context(), s.DB, items[i].ID)
+			if err != nil {
+				s.fail(w, r, err)
+				return
+			}
 		}
 	}
 	send(w, 200, map[string]any{"items": items})
@@ -148,6 +154,14 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	if a.Name == "" || utf8.RuneCountInString(a.Name) > 100 || a.Prompt == "" || utf8.RuneCountInString(a.Prompt) > 4000 || (a.Role != "requester" && a.Role != "technician" && a.Role != "admin") || len(a.Materials) > 100 {
 		s.fail(w, r, bad("请填写名称（100字内）、提示词（4000字内）、角色及最多100份材料"))
 		return
+	}
+	seenSkills := map[string]bool{}
+	for _, binding := range a.Skills {
+		if !skillRoleAllowed(binding.SkillID, a.Role) || seenSkills[binding.SkillID] {
+			s.fail(w, r, bad("技能不适用于该角色或重复"))
+			return
+		}
+		seenSkills[binding.SkillID] = true
 	}
 	seenTools := map[string]bool{}
 	for _, name := range a.Tools {
@@ -222,6 +236,29 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, &Problem{409, "conflict", "助手配置已变化，请刷新后重试"})
 		return
 	}
+	effectiveSkills := a.Skills
+	if effectiveSkills == nil {
+		effectiveSkills, err = loadSkillBindings(r.Context(), tx, id)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	for _, binding := range effectiveSkills {
+		if !skillRoleAllowed(binding.SkillID, a.Role) {
+			s.fail(w, r, bad("角色变更需同步调整技能绑定"))
+			return
+		}
+		var available int
+		if err = tx.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM skills WHERE org_id=? AND skill_id=?", u.OrgID, binding.SkillID).Scan(&available); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if available != 1 {
+			s.fail(w, r, bad("技能不存在或不可用"))
+			return
+		}
+	}
 	seen := map[int64]bool{}
 	for _, mid := range a.Materials {
 		var exists int64
@@ -260,6 +297,15 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if err == nil && a.Skills != nil {
+		_, err = tx.ExecContext(r.Context(), "DELETE FROM agent_skills WHERE agent_id=?", id)
+		for _, binding := range a.Skills {
+			if err != nil {
+				break
+			}
+			_, err = tx.ExecContext(r.Context(), "INSERT INTO agent_skills(agent_id,skill_id,enabled) VALUES(?,?,?)", id, binding.SkillID, binding.Enabled)
+		}
+	}
 	if err == nil {
 		err = writeAudit(r.Context(), tx, requestID(r), &u, "agent.update", id, "success", map[string]any{"version": version + 1, "material_count": len(a.Materials), "enabled": a.Enabled, "tool_count": len(a.Tools)})
 	}
@@ -270,6 +316,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	a.Skills = effectiveSkills
 	a.ID = id
 	a.Version = version + 1
 	send(w, 200, map[string]any{"agent": a})

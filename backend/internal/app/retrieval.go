@@ -57,6 +57,9 @@ func (s *Server) retrieval(w http.ResponseWriter, r *http.Request) {
 	send(w, 200, map[string]any{"items": hits, "mode": mode, "scope": scope})
 }
 func (s *Server) searchKnowledge(ctx context.Context, u User, agentID int64, q, mode string) ([]Evidence, error) {
+	return s.searchKnowledgeLimit(ctx, u, agentID, q, mode, 4)
+}
+func (s *Server) searchKnowledgeLimit(ctx context.Context, u User, agentID int64, q, mode string, limit int) ([]Evidence, error) {
 	if q == "" || utf8.RuneCountInString(q) > 500 {
 		return nil, bad("检索词须为 1 至 500 字")
 	}
@@ -161,8 +164,8 @@ func (s *Server) searchKnowledge(ctx context.Context, u User, agentID int64, q, 
 		}
 		return hits[i].Score > hits[j].Score
 	})
-	if len(hits) > 4 {
-		hits = hits[:4]
+	if len(hits) > limit {
+		hits = hits[:limit]
 	}
 	return hits, nil
 }

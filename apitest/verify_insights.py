@@ -79,7 +79,7 @@ def run():
  b=data['business'];check(b['kind']=='analysis' and b['query']['analysis']=='frequent','analysis rather than five-order search')
  check(b['total']==11 and len(b['items'])==5,'full recent aggregate differs from five examples')
  check(b['analysis']['categories'][0]=={'label':'照明','count':6} and b['analysis']['symptoms'][0]=={'label':'走廊灯不亮','count':6},'full category and exact-symptom ranking')
- check(b['analysis']['model_status']=='ready' and b['analysis']['notes'][0]['evidence'],'model synthesis grounded in fact ids')
+ check(b['analysis']['model_status']=='ready' and b['natural'] and '11单' in data['answer'],'model synthesis refers to verified matching count')
  _,follow=turn('admin','那不限日期的高发问题呢',conversation);check(follow['business']['total']==12 and follow['business']['query']['location']==location,'analysis followup retains location and resets dates')
  _,no_show=turn('admin',q('现在有几单白跑了'));facts={f['id']:f for f in no_show['business']['analysis']['facts']}
  check(facts['no_show']['count']==2 and facts['no_show_orders']['count']==1 and no_show['business']['total']==1,'no-show event count and distinct orders use event dates')
@@ -90,9 +90,17 @@ def run():
  for name,expected in [('requester',8),('requester2',4),('tech',2),('tech2',0),('other',1)]:
   _,answer=turn(name,q('不限日期 总结当前有哪些问题'))
   b=answer['business'];check(b['total']==expected and all(item['id']!=other['id'] for item in b['items']) if name!='other' else b['total']==expected and b['items'][0]['id']==other['id'],name+' organization/ownership/current-assignee isolation')
- _,zero=turn('admin','没有此楼 总结当前有哪些问题');check(zero['business']['total']==0 and zero['business']['analysis']['model_status']=='unavailable','zero data produces no fabricated model insight')
+ # Reuse the fixture only after checking the original date buckets.
+ sql(f"UPDATE work_orders SET created_at=DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 14 DAY) WHERE id IN ({','.join(map(str,ids))})")
+ pagination,first_page=turn('admin',q('总结当前有哪些问题'))
+ related=first_page['business']['analysis']['related']['aged']
+ check(related['total']==12 and len(related['items'])==5 and related['next_cursor'],'first evidence page is bounded and total counts the full group')
+ _,continued=turn('admin','查看未结束超过七天的下一页工单',pagination)
+ next_page=continued['business']['analysis']['related']['aged']
+ check(next_page['total']==12 and len(next_page['items'])==5 and {o['id'] for o in related['items']}.isdisjoint(o['id'] for o in next_page['items']),'next evidence page continues the same group without duplicates')
+ _,zero=turn('admin','没有此楼 总结当前有哪些问题');check(zero['business']['total']==0 and '0单' in zero['answer'],'zero data produces no fabricated model insight')
  for failure in ('insight-invalid','insight-number','insight-write','insight-timeout'):
-  mode.write_text(failure);c,data=turn('admin',q('总结当前有哪些问题'));check(data['business']['analysis']['model_status']=='unavailable' and not data['business']['analysis']['notes'] and data['business']['total']==11,'facts-only fallback for '+failure)
+  mode.write_text(failure);c,data=turn('admin',q('总结当前有哪些问题'));check(data['business']['analysis']['model_status']=='unavailable' and not data['business']['analysis']['notes'] and data['business']['total']==12,'facts-only fallback for '+failure)
  mode.write_text('insight');_,retry=turn('admin',q('总结当前有哪些问题'),c);check(retry['business']['analysis']['model_status']=='ready','explicit retry succeeds after suggestion failure')
  # Tool binding is still authoritative; restore it using the current version.
  config_before=request('GET','/api/agents?manage=1',tokens['admin'])['items'];a=next(x for x in config_before if x['id']==agents['admin'])
@@ -110,7 +118,7 @@ def run():
  req=urllib.request.Request(BASE+f'/api/conversations/{cancel_c}/messages',data=json.dumps({'content':q('总结当前有哪些问题')}).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+tokens['admin']})
  with urllib.request.urlopen(req,timeout=10) as response:
   for line in response:
-   if '正在分析' in line.decode():break
+   if '正在结合查询结果整理回答' in line.decode():break
  time.sleep(.4)
  for _ in range(20):
   state=request('GET',f'/api/conversations/{cancel_c}/messages',tokens['admin'])['items']

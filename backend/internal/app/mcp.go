@@ -25,7 +25,7 @@ const (
 )
 
 var mcpRoles = map[string]string{
-	MCPMyOrders: "requester", MCPAssignedOrders: "technician", MCPDispatch: "admin", MCPQueryOrders: "all",
+	MCPMyOrders: "requester", MCPAssignedOrders: "technician", MCPDispatch: "admin", MCPQueryOrders: "all", MCPOrderDetail: "all", MCPOrderVisit: "all", MCPKnowledge: "all",
 }
 
 func mcpRoleAllowed(name, role string) bool {
@@ -36,17 +36,25 @@ func mcpRoleAllowed(name, role string) bool {
 var errMCPToolLimit = errors.New("MCP turn tool limit reached")
 
 type mcpClaims struct {
-	Session  string `json:"session_id"`
-	AgentID  int64  `json:"agent_id"`
-	Request  string `json:"request_id"`
-	Audience string `json:"audience"`
-	Issued   int64  `json:"iat"`
-	Expires  int64  `json:"exp"`
+	Skill             string `json:"skill_id,omitempty"`
+	SkillVersion      int64  `json:"skill_config_version,omitempty"`
+	DefinitionVersion int    `json:"skill_definition_version,omitempty"`
+	Session           string `json:"session_id"`
+	AgentID           int64  `json:"agent_id"`
+	Request           string `json:"request_id"`
+	Audience          string `json:"audience"`
+	Issued            int64  `json:"iat"`
+	Expires           int64  `json:"exp"`
 }
 
 // MCP credentials are produced by the API, never by a model or browser.
-func SignMCPCall(secret, sessionHash string, agentID int64, requestID string) string {
-	c := mcpClaims{sessionHash, agentID, requestID, mcpAudience, time.Now().Unix(), time.Now().Add(60 * time.Second).Unix()}
+func SignMCPCall(secret, sessionHash string, agentID int64, requestID string, skill ...*SkillRun) string {
+	c := mcpClaims{Session: sessionHash, AgentID: agentID, Request: requestID, Audience: mcpAudience, Issued: time.Now().Unix(), Expires: time.Now().Add(60 * time.Second).Unix()}
+	if len(skill) > 0 && skill[0] != nil {
+		c.Skill = skill[0].ID
+		c.SkillVersion = skill[0].ConfigVersion
+		c.DefinitionVersion = skill[0].DefinitionVersion
+	}
 	b, _ := json.Marshal(c)
 	payload := base64.RawURLEncoding.EncodeToString(b)
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -76,6 +84,12 @@ func verifyMCPCall(secret, token string) (mcpClaims, error) {
 	now := time.Now().Unix()
 	if c.Audience != mcpAudience || len(c.Session) != 64 || len(c.Request) != 32 || c.AgentID < 1 || c.Issued > now+5 || c.Expires <= now || c.Expires-c.Issued > 60 {
 		return c, errors.New("expired or invalid MCP credential")
+	}
+	if c.Skill != "" {
+		definition, ok := skillDefinition(c.Skill)
+		if !ok || c.SkillVersion < 1 || c.DefinitionVersion != definition.DefinitionVersion {
+			return c, errors.New("invalid skill credential")
+		}
 	}
 	return c, nil
 }
@@ -124,12 +138,46 @@ func mcpAllowed(ctx context.Context, db *sql.DB, c mcpClaims, u User, name strin
 	if err == sql.ErrNoRows {
 		return errors.New("tool is not bound or is disabled")
 	}
+	if err != nil {
+		return err
+	}
+	if c.Skill != "" {
+		definition, ok := skillDefinition(c.Skill)
+		if !ok || !skillRoleAllowed(c.Skill, u.Role) || !queryContains(definition.AllowedTools, name) || definition.DefinitionVersion != c.DefinitionVersion {
+			return errors.New("tool not allowed for skill")
+		}
+		err = db.QueryRowContext(ctx, "SELECT 1 FROM skills sk JOIN agent_skills b ON b.skill_id=sk.skill_id JOIN agents a ON a.id=b.agent_id AND a.org_id=sk.org_id WHERE sk.org_id=? AND sk.skill_id=? AND sk.enabled=TRUE AND sk.version=? AND b.agent_id=? AND b.enabled=TRUE", u.OrgID, c.Skill, c.SkillVersion, c.AgentID).Scan(&exists)
+	}
 	return err
 }
 
 func validMCPArguments(raw json.RawMessage, name string) bool {
+	if name == MCPDispatch {
+		if fields, ok := mcpObjectFields(raw); ok && fields["scope"] != nil {
+			var mode string
+			var q OrderQuery
+			return len(fields) == 2 && json.Unmarshal(fields["worklist"], &mode) == nil && mode == "pre_review" && validMCPArguments(fields["scope"], MCPQueryOrders) && json.Unmarshal(fields["scope"], &q) == nil && q.Status == "submitted" && q.Analysis == "" && q.Metric == ""
+		}
+	}
+	if name == MCPOrderDetail || name == MCPOrderVisit || name == MCPKnowledge {
+		return validExtendedMCPArguments(raw, name)
+	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return name != MCPDispatch && name != MCPQueryOrders
+	}
+	if name == MCPQueryOrders {
+		fields, ok := mcpObjectFields(raw)
+		if !ok {
+			return false
+		}
+		if value, exists := fields["include_next_steps"]; exists {
+			var include bool
+			if json.Unmarshal(value, &include) != nil {
+				return false
+			}
+			delete(fields, "include_next_steps")
+			raw, _ = json.Marshal(fields)
+		}
 	}
 	fields, ok := mcpStringFields(raw)
 	if !ok {
@@ -137,7 +185,7 @@ func validMCPArguments(raw json.RawMessage, name string) bool {
 	}
 	if name == MCPQueryOrders {
 		for key := range fields {
-			if key != "analysis" && key != "queue" && key != "status" && key != "category" && key != "number" && key != "period" && key != "location" && key != "keyword" && key != "date_from" && key != "date_to" {
+			if key != "date_basis" && key != "metric" && key != "metric_cursor" && key != "analysis" && key != "queue" && key != "status" && key != "category" && key != "number" && key != "period" && key != "location" && key != "keyword" && key != "date_from" && key != "date_to" {
 				return false
 			}
 		}
@@ -146,6 +194,9 @@ func validMCPArguments(raw json.RawMessage, name string) bool {
 	}
 	if name != MCPDispatch {
 		return len(fields) == 0
+	}
+	if mode, ok := fields["worklist"]; ok {
+		return len(fields) == 1 && validWorklist(mode)
 	}
 	_, hasCategory := fields["category"]
 	return hasCategory && len(fields) == 1 && categoryOK(fields["category"])
@@ -191,7 +242,9 @@ func mcpStringFields(raw json.RawMessage) (map[string]string, bool) {
 }
 
 type mcpCategoryInput struct {
-	Category string `json:"category" jsonschema:"required"`
+	Scope    *OrderQuery `json:"scope,omitempty"`
+	Category string      `json:"category,omitempty"`
+	Worklist string      `json:"worklist,omitempty"`
 }
 
 func mcpQuery(ctx context.Context, db *sql.DB, u User, name, category string) (map[string]any, error) {
@@ -221,30 +274,35 @@ func mcpQuery(ctx context.Context, db *sql.DB, u User, name, category string) (m
 		if !categoryOK(category) {
 			return nil, errors.New("invalid category")
 		}
-		rows, err := db.QueryContext(ctx, `SELECT u.id,u.display_name,
+		items, err := dispatchCandidates(ctx, db, u, category)
+		return map[string]any{"items": items}, err
+	}
+	return nil, errors.New("unknown tool")
+}
+
+func dispatchCandidates(ctx context.Context, db *sql.DB, u User, category string) ([]BusinessCandidate, error) {
+	rows, err := db.QueryContext(ctx, `SELECT u.id,u.display_name,
 			COALESCE(SUM(CASE WHEN w.status='assigned' THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN w.status='in_progress' THEN 1 ELSE 0 END),0)
 			FROM users u JOIN technician_categories tc ON tc.user_id=u.id AND tc.category=?
 			LEFT JOIN work_orders w ON w.assignee_id=u.id AND w.org_id=u.org_id AND w.status IN ('assigned','in_progress')
 			WHERE u.org_id=? AND u.role='technician' AND u.enabled=TRUE
 			GROUP BY u.id,u.display_name ORDER BY COUNT(w.id),u.id`, category, u.OrgID)
-		if err != nil {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BusinessCandidate{}
+	for rows.Next() {
+		var id int64
+		var display string
+		var pending, progress int
+		if err = rows.Scan(&id, &display, &pending, &progress); err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		items := []map[string]any{}
-		for rows.Next() {
-			var id int64
-			var display string
-			var pending, progress int
-			if err = rows.Scan(&id, &display, &pending, &progress); err != nil {
-				return nil, err
-			}
-			items = append(items, map[string]any{"id": id, "display_name": display, "categories": []string{category}, "pending_count": pending, "in_progress_count": progress})
-		}
-		return map[string]any{"items": items}, rows.Err()
+		items = append(items, BusinessCandidate{ID: id, Name: display, Categories: []string{category}, Pending: pending, Progress: progress})
 	}
-	return nil, errors.New("unknown tool")
+	return items, rows.Err()
 }
 
 // MCPHandler is mounted only on the internal Compose network. A signed API
@@ -293,6 +351,23 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 						}
 					}
 				}
+			} else if name == MCPDispatch && category == "" {
+				var args mcpCategoryInput
+				err = json.Unmarshal(req.Params.Arguments, &args)
+				if err == nil && c.Skill != "dispatch_advice" {
+					err = denied()
+				}
+				if err == nil {
+					// The compound result also reads orders. Require that separate agent binding.
+					err = mcpAllowed(ctx, db, mcpClaims{AgentID: c.AgentID}, u, MCPQueryOrders)
+				}
+				if err == nil {
+					var result BusinessResult
+					result, err = adminWorklist(ctx, db, u, args.Worklist, args.Scope)
+					output = map[string]any{"worklist": result}
+				}
+			} else if name == MCPOrderDetail || name == MCPOrderVisit || name == MCPKnowledge {
+				output, err = extendedMCPQuery(ctx, db, u, c, name, req.Params.Arguments)
 			} else {
 				output, err = mcpQuery(ctx, db, u, name, category)
 			}
@@ -310,7 +385,7 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 		if name == MCPQueryOrders && validMCPArguments(req.Params.Arguments, name) {
 			var q OrderQuery
 			if json.Unmarshal(req.Params.Arguments, &q) == nil {
-				meta["query"] = q
+				meta["query"] = map[string]any{"analysis": q.Analysis, "queue": q.Queue, "status": q.Status, "category": q.Category, "period": q.Period, "has_location": q.Location != "", "has_keyword": q.Keyword != "", "has_number": q.Number != "", "has_dates": q.DateFrom != "", "has_cursor": q.MetricCursor != ""}
 			}
 		}
 		if category != "" {
@@ -345,6 +420,15 @@ func MCPHandler(db *sql.DB, secret string) http.Handler {
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: MCPQueryOrders, Description: "查询授权工单，或汇总高发问题、积压和真实上门异常；仅限当前登录角色范围"}, func(ctx context.Context, req *mcp.CallToolRequest, _ OrderQuery) (*mcp.CallToolResult, map[string]any, error) {
 		return tool(ctx, req, MCPQueryOrders, "")
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: MCPOrderDetail, Description: "读取当前授权工单详情及按需分页处理时间线"}, func(ctx context.Context, req *mcp.CallToolRequest, _ DetailInput) (*mcp.CallToolResult, map[string]any, error) {
+		return tool(ctx, req, MCPOrderDetail, "")
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: MCPOrderVisit, Description: "读取当前授权工单方便时间、预约和上门记录"}, func(ctx context.Context, req *mcp.CallToolRequest, _ VisitInput) (*mcp.CallToolResult, map[string]any, error) {
+		return tool(ctx, req, MCPOrderVisit, "")
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: MCPKnowledge, Description: "检索本助手当前绑定的授权知识材料"}, func(ctx context.Context, req *mcp.CallToolRequest, _ KnowledgeInput) (*mcp.CallToolResult, map[string]any, error) {
+		return tool(ctx, req, MCPKnowledge, "")
 	})
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{JSONResponse: true, SessionTimeout: time.Minute})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

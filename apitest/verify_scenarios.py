@@ -2,10 +2,11 @@
 import argparse, concurrent.futures, datetime, json, subprocess, time, urllib.error, urllib.request, uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
-p=argparse.ArgumentParser();p.add_argument('--project',default='campus-repair-draft-check');p.add_argument('--env-file',default='tmp/draft-check.env');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--project',default='campus-repair-draft-check');p.add_argument('--env-file',default='tmp/draft-check.env');p.add_argument('--compose-file',action='append',default=[]);a=p.parse_args()
 if not a.project.endswith('-check'):raise SystemExit('Requires isolated *-check project')
 root=Path(__file__).resolve().parents[1];env=dict(l.split('=',1) for l in (root/a.env_file).read_text().splitlines() if '=' in l and not l.startswith('#'));base='http://127.0.0.1:'+env['WEB_PORT'];checks=[]
 compose=['docker','compose','-p',a.project,'--env-file',a.env_file,'-f','compose.yaml','-f','compose.verify.yaml','-f','compose.knowledge-check.yaml','-f','compose.draft-check.yaml']
+compose += [value for file in a.compose_file for value in ('-f',file)]
 def dc(*cmd,input=None,extra=None):
  r=subprocess.run(compose+(['-f',extra] if extra else [])+list(cmd),input=input,cwd=root,capture_output=True,text=True)
  if r.returncode:raise RuntimeError('Isolated operation failed; raw configuration suppressed')
@@ -78,6 +79,16 @@ for role,token in [('admin',admin),('requester',requester),('technician',tech)]:
  _,reset=query(token,role,'全部类别',cid);check(reset['total']==s['action'] and not reset['query'].get('category'),'reset category retains queue '+role)
  # A normal topic switch prevents unrelated fragments inheriting filters.
  done(token,cid,'你好');plain=done(token,cid,'照明的');check('business' not in plain,'ordinary conversation clears query context '+role)
+# Explicit requester counts query the current queue once and skip the model.
+own_counts=summary(requester)
+for question,queue in (('我的报修还有多少单未结束？','active'),('我的报修还有多少单待我处理？','action')):
+ events=turn(requester,create(requester,'requester'),question)
+ business=events[-1][1]['business']
+ check(business['query']=={'queue':queue,'period':'all'} and business['total']==own_counts[queue],'direct requester count uses page scope '+queue)
+ rid=events[0][1]['request_id']
+ audit=expect(200,req('GET','/api/audit?request_id='+rid+'&action=assistant.performance',admin),'count performance audit')['items']
+ check(len(audit)==1 and audit[0]['metadata']['MCP']['calls']==1 and
+       not {'planner','answer_generation'} & audit[0]['metadata'].keys(),'one tool and no model stages '+queue)
 # Status/number selection and non-disclosure.
 _,b=query(admin,'admin','有哪些单等我审核');check(b['total']==summary(admin)['statuses'].get('submitted',0),'natural review synonym')
 _,b=query(requester,'requester','有哪些报修待我确认');check(b['total']==summary(requester)['statuses'].get('awaiting_confirmation',0),'requester confirmation synonym')
@@ -96,7 +107,7 @@ h=expect(200,req('GET',f'/api/conversations/{cid}/messages',tech),'history after
 # Real load recommendations, missing-category clarification, write requests stay read-only.
 cid=create(admin,'admin');clarify=done(admin,cid,'有哪些师傅可以安排');check('哪一类' in clarify['answer'] and 'business' not in clarify,'missing category asks first')
 reply=done(admin,cid,'照明的');candidates=reply['business']['candidates'];check(candidates and all('lighting' in c['categories'] for c in candidates),'candidate followup uses real category')
-loads=[c['pending_count']+c['in_progress_count'] for c in candidates];check(loads==sorted(loads) and '没有修改工单' in reply['answer'],'recommendation uses actual load without dispatch')
+loads=[c['pending_count']+c['in_progress_count'] for c in candidates];check(loads==sorted(loads) and any(c['display_name'] in reply['answer'] for c in candidates),'recommendation uses actual load without dispatch')
 reply=done(admin,cid,'帮我直接派单给第一位师傅');check('没有派单' in reply['answer'],'write request clearly not executed')
 # Unsupported filters ask a concrete clarification rather than silently counting all dates/categories.
 cid=create(admin,'admin')

@@ -84,7 +84,7 @@ m1=upload(admin,'演示：助手照明报修须知','照明报修请填写楼栋
 m2=upload(admin,'演示：安全提醒','照明报修注意安全，发现冒烟请停止使用并联系现场人员。不要自行拆卸、接线或带电操作。电路安全提醒，仅供软件验收。')
 secret=upload(admin,'演示：未绑定材料','隧道量子梨花专用资料。不得出现在未绑定助手检索中。')
 foreign=upload(otheradmin,'隔离演示资料','照明报修隔离组织资料。')
-a=configure(aid,enabled=True,material_ids=[m1,m2]);configure(ta['id'],enabled=True,material_ids=[m1]);configure(aa['id'],enabled=True,material_ids=[m1])
+a=configure(aid,enabled=True,material_ids=[m1,m2],tool_names=list(dict.fromkeys(a.get('tool_names',[])+['search_repair_knowledge'])));configure(ta['id'],enabled=True,material_ids=[m1]);configure(aa['id'],enabled=True,material_ids=[m1])
 expect(400,req('PUT',f'/api/agents/{aid}',admin,{**a,'material_ids':[foreign]}),'cross material binding');expect(409,req('PUT',f'/api/agents/{aid}',admin,{**a,'version':a['version']-1}),'stale configuration')
 for search_mode in ('keyword','vector','hybrid'):
  hits=expect(200,req('GET',f'/api/retrieval?agent_id={aid}&mode={search_mode}&q='+urllib.parse.quote('照明报修'),requester),'bound search')['items'];check(bool(hits) and all(h['material_id'] in (m1,m2) for h in hits),'bound/current/org scope')

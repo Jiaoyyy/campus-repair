@@ -84,3 +84,36 @@ func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
 	}
 	send(w, 200, map[string]any{"total": total, "action": action, "active": active, "finished": ended, "statuses": counts})
 }
+
+func (s *Server) workOrderStats(w http.ResponseWriter, r *http.Request) {
+	u := current(r)
+	if u.Role != "admin" {
+		s.fail(w, r, denied())
+		return
+	}
+	q, args := orderFilter(u)
+	rows, err := s.DB.QueryContext(r.Context(), "SELECT status,category,COUNT(*) FROM work_orders WHERE "+q+" GROUP BY status,category", args...)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	defer rows.Close()
+	statuses, categories := map[string]int{}, map[string]int{}
+	total := 0
+	for rows.Next() {
+		var status, category string
+		var count int
+		if err := rows.Scan(&status, &category, &count); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		statuses[status] += count
+		categories[category] += count
+		total += count
+	}
+	if err := rows.Err(); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	send(w, 200, map[string]any{"total": total, "statuses": statuses, "categories": categories})
+}

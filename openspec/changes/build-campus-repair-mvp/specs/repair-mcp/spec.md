@@ -18,7 +18,7 @@
 - **THEN** 调用被拒绝，不访问数据，记录拒绝原因
 
 ### Requirement: 只读工具及调用权限
-系统 SHALL 仅暴露查询本人工单、查询已分配任务、查询可派人员及授权工单筛选四种只读工具。前三种分别仅供报修人、维修人员、管理员使用；新增 query_work_orders 供三角色在各自授权范围使用；结果限本组织，工单查询按归属过滤，人员查询只返回 ID、显示名称、负责类别、待接单/处理中数量。工具不得提供联系方式、密码、令牌或无关数据。
+系统 SHALL 以查询本人工单、查询已分配任务、查询可派人员及授权工单筛选四种只读工具为基础目录；扩展工具须来自已定义并通过发现和绑定校验的固定只读白名单。前三种分别仅供报修人、维修人员、管理员使用；新增 query_work_orders 供三角色在各自授权范围使用；结果限本组织，工单查询按归属过滤，人员查询只返回 ID、显示名称、负责类别、待接单/处理中数量。工具不得提供联系方式、密码、令牌或无关数据。
 
 #### Scenario: 查询本人工单
 - **WHEN** 报修人经工具请求工单状态
@@ -47,7 +47,7 @@
 - **THEN** 终止该调用并提示暂不可查询，不宣称已取得实时工单数据
 
 ### Requirement: 授权工单筛选工具
-query_work_orders SHALL 只接受queue/status/category/number/period/location/keyword/date_from/date_to白名单字段，不接受身份或任意SQL；返回完整匹配数、状态计数、受限列表和查询时间。默认助手首次升级/初始化绑定该新增只读工具，管理员可解绑或停用，后续重启不得恢复主动移除的绑定；自定义助手需管理员绑定，客户端与MCP服务端均校验。
+query_work_orders SHALL 只接受queue/status/category/number/period/location/keyword/date_from/date_to、已有analysis及扩展规约明确声明的include_next_steps白名单字段，不接受身份或任意SQL；返回完整匹配数、状态计数、受限列表和查询时间。默认助手首次升级/初始化绑定该新增只读工具，管理员可解绑或停用，后续重启不得恢复主动移除的绑定；自定义助手需管理员绑定，客户端与MCP服务端均校验。
 
 #### Scenario: 完整计数及配置撤销
 - **WHEN** 匹配工单多于卡片列表上限，或管理员解绑筛选工具后继续询问数量
@@ -61,8 +61,12 @@ query_work_orders SHALL 增加 location、keyword、date_from/date_to 白名单�
 - **THEN** 只匹配字面内容；空结果限于展示的筛选范围，不扩大到其他组织或全部工单
 
 ### Requirement: 严格筛选参数结构
-工具参数 SHALL 拒绝重复字段、null、非字符串和非法类别，不能将无效参数静默作为默认全量查询。
+工具参数 SHALL 拒绝重复字段、null、声明为字符串的字段收到非字符串以及非法类别，不能将无效参数静默作为默认全量查询。
 
 #### Scenario: 条件字段重复或空类型
 - **WHEN** 模型或客户端提供重复period或location=null
 - **THEN** 服务端拒绝，不执行授权查询，不生成结果快照
+
+## Planning References
+
+详情、处理历史、上门安排、授权知识检索、下一步信息及有界编排的待实施扩展见 `openspec/changes/improve-assistant-tools-and-skills/specs/repair-mcp/spec.md` 对应变更。基础四工具已实现范围按原任务记录，新增工具待验收。

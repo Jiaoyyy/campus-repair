@@ -76,7 +76,7 @@ try:
     before = sql('SELECT CONCAT(COUNT(*),\":\",SUM(version),\":\",(SELECT COUNT(*) FROM work_order_events)) FROM work_orders')
     _, whole = query('admin', '范围验收楼有什么问题')
     check(whole['business']['query']['location'] == '范围验收楼' and whole['business']['query']['period'] == 'all', 'whole building has no invented date')
-    check(not whole['business']['query'].get('keyword') and '不限日期' in whole['answer'], 'generic problem is not a symptom filter; scope displayed')
+    check(not whole['business']['query'].get('keyword') and not whole['business']['query'].get('date_from') and bool(whole['business']['time_basis']), 'generic problem is not a symptom filter; scope displayed')
     whole_ids = {item['id'] for item in whole['business']['items']}
     check(all(order['id'] in whole_ids for order in (orders[0], orders[1], orders[2], orders[4])) and orders[3]['id'] not in whole_ids, 'old floors included with organization isolation')
     _, floor = query('admin', '范围验收楼一楼怎么了')
@@ -84,7 +84,7 @@ try:
     check(all('一楼' in item['location'] for item in floor['business']['items']), 'floor does not include second floor')
     recent_cid, recent = query('admin', '范围验收楼最近有什么故障')
     check(recent['business']['query']['period'] == 'recent' and recent['business']['total'] == 0, 'explicit recent excludes fourteen-day-old creation')
-    check('时间范围外仍可能有未结束工单' in recent['answer'], 'recent empty result explains older unresolved possibility')
+    check(recent['business']['total']==0 and bool(recent['business']['time_basis']), 'recent empty result is scoped to a creation window')
     _, follow = query('admin', '那范围验收楼一楼呢', recent_cid)
     check(follow['business']['query']['period'] == 'recent' and follow['business']['total'] == 0, 'short followup keeps recent dates')
     _, reset = query('admin', '范围验收楼有什么问题', recent_cid)

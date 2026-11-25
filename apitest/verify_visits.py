@@ -1,4 +1,5 @@
 """Visit contracts in the named isolated mock fixture only. Never uses a real gateway."""
+import threading
 import concurrent.futures, datetime as dt, json, subprocess, time, urllib.error, urllib.request, uuid
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
@@ -37,6 +38,35 @@ TZ=dt.timezone(dt.timedelta(hours=8))
 def window(hours=1):
  start=(dt.datetime.now(TZ)+dt.timedelta(hours=hours)).replace(microsecond=0)
  return {'start':start.isoformat(),'end':(start+dt.timedelta(hours=2)).isoformat()}
+def check_cross_order_schedule():
+ # Use a separate day from the standard workbench fixtures.
+ start=dt.datetime.now(TZ)+dt.timedelta(days=7)
+ def period(offset, length):
+  begins=start+dt.timedelta(minutes=offset)
+  return {'start':begins.isoformat(),'end':(begins+dt.timedelta(minutes=length)).isoformat()}
+ orders=[]
+ for _ in range(2):
+  o=assigned(order())
+  o=expect(200,act(o,'accept'),'accept concurrent fixture')['order']
+  orders.append(do(o,'availability',**period(0,180)))
+ barrier=threading.Barrier(2)
+ def book(o):
+  barrier.wait(timeout=10)
+  return write(o,'schedule',**period(0,60))
+ with concurrent.futures.ThreadPoolExecutor(2) as pool:
+  results=list(pool.map(book,orders))
+ check(sorted(code for code,_ in results)==[200,409],'one concurrent booking per technician')
+ loser=next(i for i,(code,_) in enumerate(results) if code==409)
+ check(results[loser][1]['error']['code']=='visit_overlap','overlap has a distinct error')
+ second=do(orders[loser],'schedule',**period(60,60))
+ before=visit(second)
+ expect(409,write(second,'schedule',reason='调整',**period(30,60)),'reject overlapping adjustment')
+ after=visit(second)
+ check(before['version']==after['version'] and before['context']['visit']==after['context']['visit'],'rejected adjustment preserves visit and version')
+ second=do(second,'schedule',reason='换时重试',**period(90,60))
+ for o in orders:
+  do(detail(o),'wait-parts',reason='测试结束',expected_resume_at=window()['end'])
+
 checks=[]
 # Refuse fixtures whose actual API is attached to a real model.
 cid=dc('ps','-q','api');info=json.loads(subprocess.check_output(['docker','inspect',cid]))[0]
@@ -116,11 +146,15 @@ o=assigned(order());o=expect(200,act(o,'accept'),'accept')['order'];f=window();o
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
  futures=[pool.submit(write,o,'depart'),pool.submit(write,o,'availability',None,**window(3),reason='演示调整')];codes=sorted(x.result()[0] for x in futures)
 check(codes==[200,409],'availability versus depart atomic')
+do(detail(o),'wait-parts',reason='结束并发测试预约',expected_resume_at=window()['end'])
 # Schedule versus completion and exception versus resume races.
 x=assigned(order());x=expect(200,act(x,'accept'),'accept')['order'];f=window();x=do(x,'availability',**f)
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
  codes=sorted(v.result()[0] for v in [pool.submit(write,x,'schedule',None,**f),pool.submit(act,x,'complete',None,measures='演示',result='完成')])
 check(codes==[200,409],'schedule versus completion atomic')
+scheduled_order=detail(x)
+if scheduled_order['status']=='in_progress':
+ do(scheduled_order,'wait-parts',reason='结束并发测试预约',expected_resume_at=window()['end'])
 x=assigned(order());x=expect(200,act(x,'accept'),'accept')['order'];x=do(x,'wait-parts',reason='演示',expected_resume_at=window()['start'])
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
  codes=sorted(v.result()[0] for v in [pool.submit(write,x,'resume',None,reason='已到货'),pool.submit(write,x,'wait-parts',None,reason='更新',expected_resume_at=window()['start'])])
@@ -171,6 +205,7 @@ try:
 finally:sql("UPDATE users SET enabled=TRUE WHERE username='tech'")
 t=login('tech','SEED_TECH_PASSWORD');expect(200,req('POST','/api/logout',t),'logout')
 expect(401,write(x,'depart',t),'revoked session write')
+check_cross_order_schedule()
 # Repeated initialization and persistence.
 before=visit(x);old_count=sql('SELECT COUNT(*) FROM work_orders');dc('restart','api')
 for _ in range(100):

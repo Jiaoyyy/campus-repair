@@ -10,20 +10,9 @@ import (
 )
 
 // Read-only routing never accepts identity or authorization from model output.
-func repairCategory(q string) string {
-	switch {
-	case containsAny(q, "照明", "灯"):
-		return "lighting"
-	case containsAny(q, "电器", "插座"):
-		return "electrical"
-	case containsAny(q, "给排水", "水管", "水龙头", "漏水"):
-		return "plumbing"
-	}
-	return ""
-}
 func dispatchQuestion(q string) bool {
 	return (containsAny(q, "推荐", "安排") && containsAny(q, "谁", "哪位")) || containsAny(q, "可派", "派单人员", "可分配人员", "师傅", "维修人员", "维修工") &&
-		containsAny(q, "哪些", "几个", "几位", "多少", "谁", "有空", "可派", "可分配", "安排", "找", "推荐")
+		containsAny(q, "哪些", "几个", "几位", "多少", "谁", "有空", "闲", "可派", "可分配", "安排", "找", "推荐")
 }
 func mcpIntent(role, question string) (string, any) {
 	q := strings.TrimSpace(question)

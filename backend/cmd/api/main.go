@@ -14,7 +14,16 @@ import (
 )
 
 func main() {
-	c, err := app.LoadConfig()
+	migrate := len(os.Args) == 2 && os.Args[1] == "migrate"
+	if len(os.Args) > 1 && !migrate {
+		log.Fatal("expected api or api migrate")
+	}
+	mode := os.Getenv("DB_SCHEMA_MODE")
+	if mode != "" && mode != "prepared" {
+		log.Fatal("DB_SCHEMA_MODE must be empty or prepared")
+	}
+	initialize := migrate || mode == ""
+	c, err := app.LoadConfig(initialize)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,8 +49,22 @@ func main() {
 	if !ready {
 		log.Fatal("database unavailable during startup")
 	}
-	if err = app.Initialize(db, c); err != nil {
-		log.Fatal("database initialization failed")
+	if initialize {
+		if err = app.Initialize(db, c); err != nil {
+			log.Fatal("database initialization failed")
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var applied int
+		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version BETWEEN 1 AND 10").Scan(&applied)
+		cancel()
+		if err != nil || applied != 10 {
+			log.Fatal("database schema is not prepared; run api migrate with initialization credentials")
+		}
+	}
+	if migrate {
+		log.Print("campus repair database initialized")
+		return
 	}
 	application := app.NewServer(db, c.Secret)
 	server := &http.Server{Addr: c.Addr, Handler: application.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}

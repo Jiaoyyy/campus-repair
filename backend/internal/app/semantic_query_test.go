@@ -25,6 +25,10 @@ func TestNativeQueryPlanProtocol(t *testing.T) {
 		{"location", MCPQueryOrders, `{"location":"研发楼","period":"recent"}`, "tool_calls", "admin", true},
 		{"keyword", MCPQueryOrders, `{"location":"3号楼","keyword":"漏水","date_from":"2026-10-01","date_to":"2026-10-07"}`, "tool_calls", "requester", true},
 		{"ordinary", "continue_conversation", `{}`, "tool_calls", "admin", true},
+		{"legacy null arguments", MCPMyOrders, `null`, "tool_calls", "requester", true},
+		{"semantic safety skill", "continue_conversation", `{"skill_id":"safe_self_check"}`, "tool_calls", "requester", true},
+		{"semantic role denied", "continue_conversation", `{"skill_id":"dispatch_advice"}`, "tool_calls", "requester", false},
+		{"knowledge skill metadata", MCPKnowledge, `{"query":"灯具安全","skill_id":"safe_self_check"}`, "tool_calls", "requester", true},
 		{"write", "assign", `{}`, "tool_calls", "admin", false},
 		{"identity", MCPQueryOrders, `{"org_id":2}`, "tool_calls", "admin", false},
 		{"role", MCPDispatch, `{"category":"lighting"}`, "tool_calls", "requester", false},
@@ -42,7 +46,7 @@ func TestNativeQueryPlanProtocol(t *testing.T) {
 				if json.NewDecoder(r.Body).Decode(&req) != nil {
 					t.Error("bad request")
 				}
-				if req["tool_choice"] != "required" || req["parallel_tool_calls"] != false || len(req["tools"].([]any)) != 5 {
+				if req["tool_choice"] != "required" || req["parallel_tool_calls"] != false || len(req["tools"].([]any)) != 8 {
 					t.Error("native tools missing")
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -247,5 +251,69 @@ func TestQueryTransportDiagnosticRedaction(t *testing.T) {
 		if strings.Contains(failure.Error(), "private") || failure.Status != 0 {
 			t.Fatal("raw network diagnostic was retained")
 		}
+	}
+}
+
+func TestToolThinkingModeRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name, mode string
+		ordinary   bool
+		wantError  bool
+	}{
+		{name: "default tool request"},
+		{name: "explicitly disabled", mode: "disabled"},
+		{name: "invalid mode rejected", mode: "enabled", wantError: true},
+		{name: "ordinary answer", mode: "disabled", ordinary: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CHAT_TOOL_THINKING_MODE", tt.mode)
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				thinking, present := body["thinking"]
+				if tt.mode == "disabled" && !tt.ordinary {
+					option, ok := thinking.(map[string]any)
+					if !ok || option["type"] != "disabled" {
+						t.Error("missing provider tool-thinking option")
+					}
+				} else if present {
+					t.Error("unexpected thinking option")
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if tt.ordinary {
+					fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+					return
+				}
+				if body["tool_choice"] != "required" || body["parallel_tool_calls"] != false {
+					t.Error("native tool protocol changed")
+				}
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"fixture\",\"type\":\"function\",\"function\":{\"name\":\"continue_conversation\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			}))
+			defer server.Close()
+			gateway := chatConfig()
+			gateway.URL, gateway.Key, gateway.Model, gateway.Timeout = server.URL, "fixture", "fixture", time.Second
+			var err error
+			if tt.ordinary {
+				var output string
+				err = gateway.stream(context.Background(), nil, func(text string) error { output += text; return nil })
+				if output != "OK" {
+					t.Error("ordinary answer did not complete")
+				}
+			} else {
+				_, err = gateway.callFunctions(context.Background(), nil, queryPlanTools(), 1)
+			}
+			if (err != nil) != tt.wantError {
+				t.Fatalf("unexpected result: %v", err)
+			}
+			if tt.wantError && calls.Load() != 0 {
+				t.Error("invalid mode reached the gateway")
+			}
+		})
 	}
 }

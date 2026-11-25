@@ -1,0 +1,48 @@
+# Apply after compose.yaml (and compose.override.yaml for the local gateway).
+services:
+  api:
+    environment: !override
+      DB_HOST: db:3306
+      DB_NAME: ${DB_NAME:-campus_repair}
+      DB_USER: campus_api_runtime
+      DB_PASSWORD: ${DB_API_RUNTIME_PASSWORD:?provision API database credentials}
+      DB_SCHEMA_MODE: prepared
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      MCP_CALL_SECRET: ${MCP_CALL_SECRET:?set MCP_CALL_SECRET}
+      MCP_SERVER_URL: http://mcp:8081/mcp
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-115}
+      CHAT_TOOL_THINKING_MODE: ${CHAT_TOOL_THINKING_MODE:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      EMBEDDING_COLLECTION: ${EMBEDDING_COLLECTION:-repair_v1}
+      QDRANT_URL: http://qdrant:6333
+  worker:
+    environment: !override
+      DB_HOST: db:3306
+      DB_NAME: ${DB_NAME:-campus_repair}
+      DB_USER: campus_index_runtime
+      DB_PASSWORD: ${DB_INDEX_RUNTIME_PASSWORD:?provision index database credentials}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      EMBEDDING_COLLECTION: ${EMBEDDING_COLLECTION:-repair_v1}
+      QDRANT_URL: http://qdrant:6333
+  mcp:
+    environment: !override
+      DB_HOST: db:3306
+      DB_NAME: ${DB_NAME:-campus_repair}
+      DB_USER: campus_mcp_runtime
+      DB_PASSWORD: ${DB_MCP_RUNTIME_PASSWORD:?provision MCP database credentials}
+      MCP_CALL_SECRET: ${MCP_CALL_SECRET:?set MCP_CALL_SECRET}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+      EMBEDDING_COLLECTION: ${EMBEDDING_COLLECTION:-repair_v1}
+      QDRANT_URL: http://qdrant:6333

@@ -6,7 +6,7 @@
 
 ## 1. 项目定位与目标
 
-本项目是焦阳、高慧莹小组的独立学期项目，选题已获教师认可。面向单校区的日常后勤报修，覆盖照明、电器、给排水三类故障，使用演示账号和虚构数据验证完整互联网应用。
+本项目是焦阳、高慧莹小组的独立学期项目，选题已获教师认可。面向单校区的日常后勤报修，覆盖照明、电器、给排水、空调与通风、门窗与锁具、家具、校园网络、房屋设施和其他九类故障，使用演示账号和虚构数据验证完整互联网应用。
 
 项目要解决四类问题：
 
@@ -98,6 +98,24 @@ AI 用于整理报修信息、依据材料解释问题，以及辅助查询授�
 | MySQL | 工单、归属、会话、材料文本、任务、配置及审计 |
 | Qdrant | 知识向量检索；结果回读后仍需授权及版本复核 |
 | Nginx / Compose | 统一入口、反向代理、容器网络与持久卷 |
+
+### 数据库权限加固部署
+
+目标后端镜像使用 Go 1.26.11 和 MCP Go SDK 1.4.1。加固 Compose 配置使用 Docker Compose 2.24.4 或以上的 `!override`，在当前 MySQL 8.0.46 上验证。先备份数据库与附件，记录旧应用镜像标签及原 Compose 配置。下列命令使用同一项目和数据卷。
+
+```sh
+docker compose -f compose.yaml build api web
+docker compose -f compose.yaml up -d --wait db
+docker compose -f compose.yaml run --rm --no-deps api /app/api migrate
+python3 deploy/provision_db_roles.py
+docker compose -f compose.yaml -f compose.secure.yaml up -d --no-build --wait
+```
+
+若本机使用 `compose.override.yaml` 的网关映射，在最后一条命令中将该文件插在两个 `-f` 文件之间。确认成功后可在本地 `.env` 设置 `COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.secure.yaml`，使日常 Compose 命令使用同一配置。没有本地覆盖文件时从该值去掉相应文件。确认后运行 `python3 apitest/verify_backend_deployment.py`，并通过授权账号检查工单、助手和索引。
+
+初始化命令使用原数据库账号和种子配置。权限配置脚本通过数据库容器内的本地管理员连接创建专用运行账号，把三个随机密码写入权限为 600 的本地 `.env`。重复运行会验证现有授权和密码。API 运行账号负责业务操作，worker 负责知识索引，MCP 对所需业务表为只读，仅写审计和调用计数。API 与 MCP 共用签名所需的 MCP 密钥，索引和检索服务仅接收其需要的网关配置。
+
+升级失败时，恢复旧后端镜像标签和原 `COMPOSE_FILE`，以旧配置将 API、worker、MCP 及 Web 一起重建。继续使用原项目和卷名，保留 `DB_*_RUNTIME_PASSWORD` 供再次升级。旧数据库账号仅供初始化或回滚使用。准备模式启动要求目标镜像已完成迁移，后续升级也应按先迁移、再启动运行服务的顺序执行。
 
 目录分工：
 

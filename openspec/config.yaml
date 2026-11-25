@@ -5,7 +5,7 @@ context: |
   All artifacts must be written in zh-CN.
   Keep OpenSpec structural headings and SHALL/MUST keywords in English.
   独立学期项目：校园报修与智能派单平台，成员焦阳、高慧莹。
-  教师已认可选题。首版一个校区，照明、电器、给排水三类故障。
+  教师已认可选题。首版一个校区，支持九类故障，以服务端 repairCategories 为准。
   三种角色：报修人、维修人员、后勤管理员；按组织、角色和工单归属授权。
   主流程：提交、审核、派单、接单、处理、报修人确认。
   必须覆盖大语言模型、智能体、知识库与RAG、技能、真实MCP协议。

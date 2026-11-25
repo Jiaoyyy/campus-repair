@@ -32,9 +32,11 @@ type Order struct {
 	AssigneeName  string    `json:"assignee_name"`
 }
 type Input struct {
-	Category    string `json:"category"`
-	Location    string `json:"location"`
-	Description string `json:"description"`
+	SourceOrderID int64  `json:"source_order_id,omitempty"`
+	SourceVersion int64  `json:"source_version,omitempty"`
+	Category      string `json:"category"`
+	Location      string `json:"location"`
+	Description   string `json:"description"`
 }
 type Action struct {
 	Version      int64  `json:"version"`
@@ -57,12 +59,11 @@ func invisible() error           { return &Problem{404, "not_found", "资源不�
 func conflict() error {
 	return &Problem{409, "conflict", "工单状态或版本已变化，请刷新后重试"}
 }
-func categoryOK(v string) bool { return v == "lighting" || v == "electrical" || v == "plumbing" }
 func (i *Input) normalize() error {
 	i.Location = strings.TrimSpace(i.Location)
 	i.Description = strings.TrimSpace(i.Description)
 	if !categoryOK(i.Category) {
-		return bad("请选择照明、电器或给排水类别")
+		return bad("请选择有效的故障类别：" + categoryLabels() + "")
 	}
 	if i.Location == "" || utf8.RuneCountInString(i.Location) > 200 {
 		return bad("位置不能为空且不得超过200字")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -84,7 +85,7 @@ func TestConversationContextSelection(t *testing.T) {
 		t.Fatal("query must respect retrieval limit")
 	}
 	messages := buildChatMessages(Agent{Prompt: "帮助报修人"}, history, "三号楼201", nil, "本轮无资料，继续追问。")
-	if len(messages) != 5 || messages[2] != history[0] || messages[3] != history[1] || messages[4].Content != "三号楼201" {
+	if len(messages) != 5 || !reflect.DeepEqual(messages[2:4], history) || messages[4].Content != "三号楼201" {
 		t.Fatal("completed conversation history was lost")
 	}
 	if !strings.Contains(messages[0].Content, "不能创建工单") || !strings.Contains(messages[0].Content, "不编造位置") {
@@ -132,5 +133,14 @@ func TestNumberedEvidencePrompt(t *testing.T) {
 	}
 	if len(entries) != 2 || entries[0].Citation != "[1]" || entries[1].Citation != "[2]" || entries[0].ID != 80 || entries[0].Text != "禁止带电维修。" {
 		t.Fatal("citation labels must match candidate order, not database IDs")
+	}
+}
+
+func TestSafetyProhibitionCoordinatingConjunction(t *testing.T) {
+	if unsafeAnswer("不要自行拆卸、接线及带电维修。[1]") {
+		t.Fatal("simple coordinated prohibition rejected")
+	}
+	if !unsafeAnswer("不要拆卸及可以接线。") {
+		t.Fatal("positive step bypassed prohibition")
 	}
 }

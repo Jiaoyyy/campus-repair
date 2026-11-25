@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	c, err := app.LoadConfig()
+	dsn, err := app.LoadDatabaseDSN()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func main() {
 	if len(secret) < 32 {
 		log.Fatal("MCP_CALL_SECRET must contain at least 32 characters")
 	}
-	db, err := sql.Open("mysql", c.DSN)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Fatal("database configuration invalid")
 	}
