@@ -21,7 +21,7 @@ func containsAny(text string, terms ...string) bool {
 	return false
 }
 func knowledgeQuestion(text string) bool {
-	return containsAny(text, "报修", "维修", "故障", "宿舍", "楼栋", "灯", "电器", "照明", "水管", "漏水", "漏电", "冒烟", "插座", "安全", "校方", "学校", "规定", "须知", "制度", "时限", "资料", "流程", "给排水", "电路", "带电操作", "带电维修")
+	return repairCategory(text) != "" || containsAny(text, "报修", "维修", "故障", "宿舍", "楼栋", "灯", "电器", "照明", "水管", "漏水", "漏电", "冒烟", "插座", "安全", "校方", "学校", "规定", "须知", "制度", "时限", "资料", "流程", "给排水", "电路", "带电操作", "带电维修")
 }
 func evidenceQuestion(text string) bool {
 	return containsAny(text, "规定", "制度", "校方", "学校", "时限", "多久", "几天", "几小时", "安全", "需要", "要求", "流程", "根据资料")
@@ -59,7 +59,11 @@ func (s *Server) assistantKnowledge(ctx context.Context, u User, agentID int64, 
 	if query == "" {
 		return result
 	}
-	result.Mode = "keyword"
+	return s.searchAssistantKnowledge(ctx, u, agentID, query, 4)
+}
+
+func (s *Server) searchAssistantKnowledge(ctx context.Context, u User, agentID int64, query string, limit int) assistantKnowledge {
+	result := assistantKnowledge{Hits: []Evidence{}, Mode: "keyword", State: "empty"}
 	// No bound published material means there is no evidence to search. Do not
 	// make an embedding call or depend on Qdrant just to continue a conversation.
 	scope, args := knowledgeScope(u, agentID)
@@ -76,9 +80,9 @@ func (s *Server) assistantKnowledge(ctx context.Context, u User, agentID int64, 
 	if vectorConfig().configured() {
 		result.Mode = "hybrid"
 	}
-	hits, err := s.searchKnowledge(ctx, u, agentID, query, result.Mode)
+	hits, err := s.searchKnowledgeLimit(ctx, u, agentID, query, result.Mode, limit)
 	if err != nil && result.Mode == "hybrid" {
-		hits, err = s.searchKnowledge(ctx, u, agentID, query, "keyword")
+		hits, err = s.searchKnowledgeLimit(ctx, u, agentID, query, "keyword", limit)
 		result.Mode = "keyword"
 		result.Notice = "部分资料检索暂不可用，本轮已使用可用的文字资料。"
 	}
@@ -105,8 +109,9 @@ func assistantContextNote(role, input string, history []chatMessage, knowledge a
 		"degraded":      "部分检索能力不可用，已回退到可用文字资料。只使用实际提供的片段，不能宣称完整资料均已核实。",
 		"unavailable":   "本轮资料查询失败。明确说明资料暂不可用，仍可继续交流、追问位置和现象；禁止将失败描述为未找到制度或虚构校方事实。",
 	}[knowledge.State]
+	note += " 当前报修类别：" + categoryLabels() + "。回答当前可选类别时以此目录为准；旧材料中的类别举例不限定当前范围。报修人可在普通建单或助手草稿卡中选择照片和短视频，由本人确认提交；助手无法查看附件内容。"
 	if role == "admin" && dispatchQuestion(input) && repairCategory(input) == "" {
-		note += " 用户在询问维修人员，但未指定故障类别；当前只能按照明、电器、给排水类别查询。请自然询问想了解哪一类，不要猜测总人数或人员负载。"
+		note += " 用户在询问维修人员，但未指定故障类别；可按上述类别查询。请自然询问想了解哪一类，不要猜测总人数或人员负载。"
 	}
 	return note
 }

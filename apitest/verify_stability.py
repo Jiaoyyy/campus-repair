@@ -9,12 +9,14 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--project',default='campus-repair-draft-check')
 p.add_argument('--env-file',default='tmp/draft-check.env')
 p.add_argument('--state-dir',default='tmp/draft-mock')
+p.add_argument('--backend-override')
 a=p.parse_args()
 if not a.project.startswith('campus-repair-') or not a.project.endswith('-check'):raise SystemExit('Requires isolated campus-repair-*-check project')
 env_path=(root/a.env_file).resolve();state=(root/a.state_dir).resolve()
 env=dict(l.split('=',1) for l in env_path.read_text().splitlines() if '=' in l and not l.startswith('#'))
 base='http://127.0.0.1:'+env['WEB_PORT']
 compose=['docker','compose','-p',a.project,'--env-file',str(env_path),'-f','compose.yaml','-f','compose.verify.yaml','-f','compose.knowledge-check.yaml','-f','compose.draft-check.yaml']
+if a.backend_override:compose += ['-f',str((root/a.backend_override).resolve())]
 def dc(*args):
     r=subprocess.run(compose+list(args),cwd=root,capture_output=True,text=True)
     if r.returncode:raise RuntimeError('Isolated container operation failed; raw output suppressed')
@@ -47,7 +49,7 @@ logs=root/'tmp/stability';logs.mkdir(exist_ok=True)
 suites=[
  ('assistant',[sys.executable,'apitest/verify_assistant.py','--project',a.project,'--env-file',str(env_path),'--state-dir',str(state),'--compose-file','compose.draft-check.yaml']),
  ('drafts',[sys.executable,'apitest/verify_drafts.py','--project',a.project,'--env-file',str(env_path)]),
- ('scenarios',[sys.executable,'apitest/verify_scenarios.py','--project',a.project,'--env-file',str(env_path)]),
+ ('scenarios',[sys.executable,'apitest/verify_scenarios.py','--project',a.project,'--env-file',str(env_path)]+(['--compose-file',a.backend_override] if a.backend_override else [])),
  ('semantic',[sys.executable,'apitest/verify_semantic_failures.py']),
  ('buildings',[sys.executable,'apitest/verify_building_queries.py']),
  ('mcp',['docker','run','--rm','--network',a.project+'_default','-v',str(root/'apitest')+':/verify/apitest:ro','-v',str(env_path)+':/verify/.env:ro','-e','API_TEST_URL=http://api:8080','-e','MCP_TEST_URL=http://mcp:8081/mcp','python:3.12-alpine','python','/verify/apitest/verify_mcp.py']),
@@ -67,6 +69,7 @@ finally:
     dc('restart','api');ready();admin=login()
     current=req('GET','/api/agents?manage=1',token=admin)['items']
     fields=('name','role','prompt','enabled','material_ids','tool_names')
+    if all('skill_bindings' in old for old in snapshot):fields += ('skill_bindings',)
     for old in snapshot:
         live=next(x for x in current if x['id']==old['id'])
         req('PUT',f"/api/agents/{old['id']}",{**{k:old[k] for k in fields},'version':live['version']},admin)

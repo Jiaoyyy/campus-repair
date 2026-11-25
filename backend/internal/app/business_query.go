@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,24 +18,44 @@ import (
 const MCPQueryOrders = "query_work_orders"
 
 type OrderQuery struct {
-	Analysis string `json:"analysis,omitempty"`
-	Queue    string `json:"queue,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Category string `json:"category,omitempty"`
-	Number   string `json:"number,omitempty"`
-	Period   string `json:"period,omitempty"`
-	Location string `json:"location,omitempty"`
-	Keyword  string `json:"keyword,omitempty"`
-	DateFrom string `json:"date_from,omitempty"`
-	DateTo   string `json:"date_to,omitempty"`
+	DateBasis    string `json:"date_basis,omitempty"`
+	Metric       string `json:"metric,omitempty"`
+	MetricCursor string `json:"metric_cursor,omitempty"`
+
+	IncludeNextSteps bool   `json:"include_next_steps,omitempty"`
+	Analysis         string `json:"analysis,omitempty"`
+	Queue            string `json:"queue,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Category         string `json:"category,omitempty"`
+	Number           string `json:"number,omitempty"`
+	Period           string `json:"period,omitempty"`
+	Location         string `json:"location,omitempty"`
+	Keyword          string `json:"keyword,omitempty"`
+	DateFrom         string `json:"date_from,omitempty"`
+	DateTo           string `json:"date_to,omitempty"`
 }
 type BusinessOrder struct {
-	ID          int64  `json:"id"`
-	Number      string `json:"number"`
-	Status      string `json:"status"`
-	Category    string `json:"category"`
-	Location    string `json:"location"`
-	Description string `json:"description"`
+	ReviewAddressMissing bool               `json:"review_address_missing,omitempty"`
+	CurrentStatus        string             `json:"current_status,omitempty"`
+	CurrentVersion       int64              `json:"current_version,omitempty"`
+	RecurrenceExists     bool               `json:"recurrence_exists,omitempty"`
+	LatestRepair         *OrderRepair       `json:"latest_repair,omitempty"`
+	VisitStart           *time.Time         `json:"visit_start,omitempty"`
+	VisitEnd             *time.Time         `json:"visit_end,omitempty"`
+	Review               *reviewSuggestion  `json:"review,omitempty"`
+	Recommended          *BusinessCandidate `json:"recommended,omitempty"`
+	Advice               string             `json:"advice,omitempty"`
+	Priority             string             `json:"priority,omitempty"`
+	Version              int64              `json:"version,omitempty"`
+	Responsible          string             `json:"responsible,omitempty"`
+
+	Next        *OrderStep `json:"next_step,omitempty"`
+	ID          int64      `json:"id"`
+	Number      string     `json:"number"`
+	Status      string     `json:"status"`
+	Category    string     `json:"category"`
+	Location    string     `json:"location"`
+	Description string     `json:"description"`
 }
 type BusinessCandidate struct {
 	ID         int64    `json:"id"`
@@ -43,23 +65,41 @@ type BusinessCandidate struct {
 	Progress   int      `json:"in_progress_count"`
 }
 type BusinessResult struct {
-	Analysis   *BusinessAnalysis   `json:"analysis,omitempty"`
-	Kind       string              `json:"kind"`
-	Query      OrderQuery          `json:"query"`
-	Total      int                 `json:"total"`
-	Statuses   map[string]int      `json:"statuses"`
-	Items      []BusinessOrder     `json:"items"`
-	Candidates []BusinessCandidate `json:"candidates,omitempty"`
-	At         time.Time           `json:"queried_at"`
-	TimeBasis  string              `json:"time_basis,omitempty"`
-	Historical bool                `json:"historical"`
+	Followup      *requesterFollowup `json:"followup,omitempty"`
+	Parts         *partsDraft        `json:"parts,omitempty"`
+	Completion    *completionDraft   `json:"completion,omitempty"`
+	ReviewSource  int64              `json:"review_source,omitempty"`
+	ReviewOrder   int64              `json:"review_order,omitempty"`
+	sourceMessage int64
+	worklistRows  []BusinessOrder
+	Natural       bool             `json:"natural,omitempty"`
+	Additional    []BusinessResult `json:"additional,omitempty"`
+
+	Detail      *OrderDetail        `json:"detail,omitempty"`
+	Warning     string              `json:"warning,omitempty"`
+	Unavailable bool                `json:"unavailable,omitempty"`
+	Analysis    *BusinessAnalysis   `json:"analysis,omitempty"`
+	Kind        string              `json:"kind"`
+	Query       OrderQuery          `json:"query"`
+	Total       int                 `json:"total"`
+	Statuses    map[string]int      `json:"statuses"`
+	Items       []BusinessOrder     `json:"items"`
+	Candidates  []BusinessCandidate `json:"candidates,omitempty"`
+	At          time.Time           `json:"queried_at"`
+	TimeBasis   string              `json:"time_basis,omitempty"`
+	Historical  bool                `json:"historical"`
 }
 
 var businessStatusNames = map[string]string{"submitted": "待审核", "needs_info": "待补充", "unassigned": "待派单", "assigned": "待接单", "in_progress": "处理中", "awaiting_confirmation": "待确认", "closed": "已关闭", "rejected": "已驳回", "cancelled": "已取消"}
-var businessCategoryNames = map[string]string{"lighting": "照明", "electrical": "电器", "plumbing": "给排水"}
 var orderNumberPattern = regexp.MustCompile(`(?i)RP[0-9a-z]{8,38}`)
 
 func (q OrderQuery) valid() bool {
+	if q.DateBasis != "" && (q.DateBasis != "visit" || q.Analysis != "" || ((q.Period == "" || q.Period == "all") && q.DateFrom == "")) {
+		return false
+	}
+	if q.Metric != "" && (q.Analysis == "" || !queryContains([]string{"aged", "overdue", "reschedule", "parts", "exception_total", "no_show_orders"}, q.Metric)) || q.MetricCursor != "" && (q.Metric == "" || len(q.MetricCursor) > 100) {
+		return false
+	}
 	if !queryContains([]string{"", "overview", "frequent", "no_show", "exceptions"}, q.Analysis) {
 		return false
 	}
@@ -96,8 +136,11 @@ func chinaToday(now time.Time) (time.Time, time.Time) {
 	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, zone)
 	return start.UTC(), start.AddDate(0, 0, 1).UTC()
 }
+
+const activeVisitStart = "(SELECT v.starts_at FROM work_order_visit_context c JOIN work_order_visits v ON v.id=c.active_visit_id WHERE c.work_order_id=w.id)"
+
 func businessQuerySQL(u User, q OrderQuery, now time.Time) (string, []any, string, error) {
-	if !q.valid() || (u.Role != "requester" && u.Role != "technician" && u.Role != "admin") {
+	if !q.valid() || q.DateBasis == "visit" && u.Role != "technician" || (u.Role != "requester" && u.Role != "technician" && u.Role != "admin") {
 		return "", nil, "", bad("查询条件无效")
 	}
 	where, args := orderFilter(u)
@@ -128,7 +171,10 @@ func businessQuerySQL(u User, q OrderQuery, now time.Time) (string, []any, strin
 	basis := ""
 	if q.Period != "" && q.Period != "all" || q.DateFrom != "" {
 		start, end := queryDates(q, now)
-		if u.Role == "technician" {
+		if q.DateBasis == "visit" {
+			where += " AND " + activeVisitStart + " >= ? AND " + activeVisitStart + " < ?"
+			basis = "预约上门时间（北京时间）"
+		} else if u.Role == "technician" {
 			// Last assignment to the CURRENT assignee, not last update or an earlier round.
 			stamp := "(SELECT MAX(e.created_at) FROM work_order_events e WHERE e.work_order_id=w.id AND e.action IN ('assign','reassign') AND e.assignee_id=w.assignee_id)"
 			where += " AND " + stamp + ">=? AND " + stamp + "<?"
@@ -146,10 +192,22 @@ func queryBusinessOrders(ctx context.Context, db *sql.DB, u User, q OrderQuery) 
 	if q.Analysis != "" {
 		return queryBusinessAnalysis(ctx, db, u, q)
 	}
+	return queryOrderPage(ctx, db, u, q, time.Now().UTC(), 1, time.Time{})
+}
+
+// Relative date filters remain anchored to the original chat turn on later pages.
+func queryOrderPage(ctx context.Context, db *sql.DB, u User, q OrderQuery, anchor time.Time, page int, createdBefore time.Time) (BusinessResult, error) {
 	result := BusinessResult{Kind: "orders", Query: q, Statuses: map[string]int{}, Items: []BusinessOrder{}, At: time.Now().UTC()}
-	where, args, basis, err := businessQuerySQL(u, q, result.At)
+	where, args, basis, err := businessQuerySQL(u, q, anchor)
+	if basis == "" {
+		basis = "工单日期不限"
+	}
 	if err != nil {
 		return result, err
+	}
+	if !createdBefore.IsZero() {
+		where += " AND w.created_at<=?"
+		args = append(args, createdBefore)
 	}
 	result.TimeBasis = basis
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
@@ -177,13 +235,23 @@ func queryBusinessOrders(ctx context.Context, db *sql.DB, u User, q OrderQuery) 
 	if err != nil {
 		return result, err
 	}
-	rows, err = tx.QueryContext(ctx, "SELECT id,number,status,category,location,description FROM work_orders w WHERE "+where+" ORDER BY updated_at DESC,id DESC LIMIT 5", args...)
+	sortBy := "updated_at DESC,id DESC"
+	if q.DateBasis == "visit" {
+		sortBy = activeVisitStart + ",id"
+	}
+	statement := "SELECT id,number,status,category,location,description,version FROM work_orders w WHERE " + where + " ORDER BY " + sortBy
+	if page > 0 {
+		page = min(page, max(1, (result.Total+4)/5))
+		statement += " LIMIT 5 OFFSET ?"
+		args = append(args, (page-1)*5)
+	}
+	rows, err = tx.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return result, err
 	}
 	for rows.Next() {
 		var o BusinessOrder
-		if err = rows.Scan(&o.ID, &o.Number, &o.Status, &o.Category, &o.Location, &o.Description); err != nil {
+		if err = rows.Scan(&o.ID, &o.Number, &o.Status, &o.Category, &o.Location, &o.Description, &o.Version); err != nil {
 			break
 		}
 		result.Items = append(result.Items, o)
@@ -194,6 +262,27 @@ func queryBusinessOrders(ctx context.Context, db *sql.DB, u User, q OrderQuery) 
 	rows.Close()
 	if err != nil {
 		return result, err
+	}
+	if q.IncludeNextSteps || q.DateBasis == "visit" {
+		for i := range result.Items {
+			item := &result.Items[i]
+			visit, e := readVisit(ctx, tx, item.ID)
+			if e != nil {
+				return result, e
+			}
+			if q.DateBasis == "visit" && visit.Visit != nil {
+				item.VisitStart = &visit.Visit.Start
+				item.VisitEnd = &visit.Visit.End
+			}
+			if q.IncludeNextSteps {
+				order, e := scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=?", item.ID))
+				if e != nil {
+					return result, e
+				}
+				next := orderNextStep(order, u, visit, result.At)
+				item.Next = &next
+			}
+		}
 	}
 	return result, tx.Commit()
 }
@@ -231,6 +320,34 @@ func queryLabel(role string, q OrderQuery) string {
 	}
 	return label
 }
+
+const partialExplanationNotice = "部分解释中的数字或标识无法核实，以下保留可核对的段落和查询结果。"
+const unverifiedExplanationNotice = "已保留可核对的查询结果，本轮正文解释未通过校验。"
+
+func technicianOrderSummary(b BusinessResult) string {
+	label := queryLabel("technician", b.Query)
+	if b.Total == 0 {
+		return label + "，暂无匹配任务。"
+	}
+	counts := []string{}
+	for _, status := range []string{"assigned", "in_progress", "awaiting_confirmation", "closed", "cancelled"} {
+		n := b.Statuses[status]
+		if n == 0 {
+			continue
+		}
+		name := businessStatusNames[status]
+		if status == "awaiting_confirmation" {
+			name = "已上报，待报修人确认"
+		}
+		counts = append(counts, fmt.Sprintf("%s %d 单", name, n))
+	}
+	summary := fmt.Sprintf("%s，共 %d 单。", label, b.Total)
+	if len(counts) > 0 {
+		summary += "其中" + strings.Join(counts, "，") + "。"
+	}
+	return summary
+}
+
 func formatBusinessResult(role string, b BusinessResult) string {
 	if b.Kind == "candidates" {
 		if len(b.Candidates) == 0 {
@@ -243,7 +360,10 @@ func formatBusinessResult(role string, b BusinessResult) string {
 	if b.Total == 0 {
 		text := label + "目前没有匹配记录。"
 		if b.TimeBasis != "" {
-			text += "\n" + b.TimeBasis + "。时间范围外仍可能有未结束工单，可以改问“不限日期的未结束工单”。"
+			text += "\n" + b.TimeBasis + "。"
+		}
+		if b.Query.Period != "" && b.Query.Period != "all" || b.Query.DateFrom != "" {
+			text += "时间范围外仍可能有未结束工单，可以改问“不限日期的未结束工单”。"
 		}
 		return text + "这不代表其他范围也没有工单。"
 	}
@@ -258,15 +378,14 @@ func formatBusinessResult(role string, b BusinessResult) string {
 	for _, item := range b.Items {
 		text += "\n" + item.Location + "：" + item.Description + "（" + businessStatusNames[item.Status] + "，" + item.Number + "）"
 	}
-	if b.Total > len(b.Items) {
-		text += fmt.Sprintf("下方显示最近更新的 %d 单，总数按全部匹配记录统计。", len(b.Items))
-	}
-	if b.TimeBasis != "" {
-		text += "\n" + b.TimeBasis + "。"
-	}
+
 	return text
 }
 func decodeBusinessResult(raw any) (*BusinessResult, error) {
+	return decodeOrderSnapshot(raw, false)
+}
+
+func decodeOrderSnapshot(raw any, complete bool) (*BusinessResult, error) {
 	b, err := json.Marshal(raw)
 	if err != nil {
 		return nil, err
@@ -285,7 +404,7 @@ func decodeBusinessResult(raw any) (*BusinessResult, error) {
 		}
 		sum += n
 	}
-	if sum != result.Total || len(result.Items) > 5 || len(result.Items) > result.Total {
+	if sum != result.Total || (!complete && len(result.Items) > 5) || (complete && len(result.Items) != result.Total) || len(result.Items) > result.Total {
 		return nil, errors.New("invalid result count")
 	}
 	for _, item := range result.Items {
@@ -295,9 +414,9 @@ func decodeBusinessResult(raw any) (*BusinessResult, error) {
 	}
 	return &result, nil
 }
-func (s *Server) businessHistory(ctx context.Context, u User, cid, mid int64) (*BusinessResult, error) {
+func (s *Server) businessHistory(ctx context.Context, u User, cid, mid int64, displayAgent int64) (*BusinessResult, error) {
 	var raw []byte
-	err := s.DB.QueryRowContext(ctx, "SELECT result FROM assistant_business_results WHERE message_id=?", mid).Scan(&raw)
+	err := s.DB.QueryRowContext(ctx, "SELECT b.result FROM assistant_business_results b JOIN messages m ON m.id=b.message_id WHERE m.id=? AND m.conversation_id=? AND m.role='assistant' AND m.status='complete'", mid, cid).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -309,6 +428,69 @@ func (s *Server) businessHistory(ctx context.Context, u User, cid, mid int64) (*
 		return nil, errors.New("invalid stored query")
 	}
 	result.Historical = true
+	if result.Kind == completionDraftKind || result.Kind == partsDraftKind || result.Kind == requesterFollowupKind {
+		if result.Kind == requesterFollowupKind && u.Role != "requester" || result.Kind != requesterFollowupKind && u.Role != "technician" {
+			return &BusinessResult{Kind: result.Kind, Unavailable: true}, nil
+		}
+		for i := range result.Items {
+			item := &result.Items[i]
+			order, err := s.getOrder(ctx, u, item.ID)
+			if err != nil {
+				var problem *Problem
+				if errors.As(err, &problem) && problem.Status == 404 {
+					return &BusinessResult{Kind: result.Kind, Unavailable: true}, nil
+				}
+				return nil, err
+			}
+			if order.Version != item.Version || order.Status != item.Status {
+				item.Version = 0
+			}
+			if result.Kind == requesterFollowupKind && item.Status == "closed" && item.LatestRepair != nil {
+				item.RecurrenceExists, err = recurrenceExists(ctx, s.DB, item.LatestRepair.ID)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		return &result, nil
+	}
+
+	if (result.Kind == "candidates" || result.Kind == "worklist" || result.Kind == "pre_review" || result.Kind == reviewDiscussion) && u.Role != "admin" {
+		return &BusinessResult{Kind: result.Kind, Unavailable: true, Items: []BusinessOrder{}, Statuses: map[string]int{}, At: result.At, Historical: true}, nil
+	}
+	if result.Kind == "pre_review" && displayAgent != 0 {
+		_, skillErr := s.selectSkill(ctx, u, Agent{ID: displayAgent}, "", nil, MCPDispatch)
+		if skillErr != nil || mcpAllowed(ctx, s.DB, mcpClaims{AgentID: displayAgent}, u, MCPQueryOrders) != nil {
+			return &BusinessResult{Kind: result.Kind, Unavailable: true, Historical: true}, nil
+		}
+	}
+	if result.Detail != nil {
+		if _, e := s.getOrder(ctx, u, result.Detail.Order.ID); e != nil {
+			var problem *Problem
+			if errors.As(e, &problem) && problem.Status == 404 {
+				return &BusinessResult{Kind: result.Kind, Unavailable: true, Items: []BusinessOrder{}, Statuses: map[string]int{}, At: result.At, Historical: true}, nil
+			}
+			return nil, e
+		}
+	}
+	if result.Kind == "pre_review" || result.Natural || len(result.Additional) > 0 || result.Analysis != nil && len(result.Analysis.Related) > 0 {
+		for i, item := range result.evidenceOrders() {
+			order, err := s.getOrder(ctx, u, item.ID)
+			if err != nil {
+				var problem *Problem
+				if errors.As(err, &problem) && problem.Status == 404 {
+					return &BusinessResult{Kind: result.Kind, Unavailable: true, Items: []BusinessOrder{}, Statuses: map[string]int{}, At: result.At, Historical: true}, nil
+				}
+				return nil, err
+			}
+			if displayAgent != 0 && result.Kind == "pre_review" && i < len(result.Items) {
+				result.Items[i].CurrentStatus = order.Status
+				result.Items[i].CurrentVersion = order.Version
+				result.Items[i].ReviewAddressMissing = needsReviewBuilding(order.Location)
+			}
+		}
+		return &result, nil
+	}
 	visibleItems := []BusinessOrder{}
 	for _, item := range result.Items {
 		_, err := s.getOrder(ctx, u, item.ID)
@@ -324,28 +506,42 @@ func (s *Server) businessHistory(ctx context.Context, u User, cid, mid int64) (*
 	result.Items = visibleItems
 	return &result, nil
 }
-func (s *Server) lastBusinessResult(ctx context.Context, cid int64) (*BusinessResult, error) {
-	var raw []byte
-	err := s.DB.QueryRowContext(ctx, "SELECT b.result FROM assistant_business_results b JOIN messages m ON m.id=b.message_id WHERE m.id=(SELECT MAX(id) FROM messages WHERE conversation_id=? AND role='assistant' AND status='complete')", cid).Scan(&raw)
+func (s *Server) lastBusinessResult(ctx context.Context, u User, cid int64) (*BusinessResult, error) {
+	var messageID int64
+	err := s.DB.QueryRowContext(ctx, "SELECT id FROM messages WHERE conversation_id=? AND role='assistant' AND status='complete' ORDER BY id DESC LIMIT 1", cid).Scan(&messageID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var result BusinessResult
-	if json.Unmarshal(raw, &result) != nil {
-		return nil, errChat
+	result, err := s.businessHistory(ctx, u, cid, messageID, 0)
+	if err != nil || result == nil || result.Unavailable {
+		return nil, err
 	}
-	return &result, nil
+	result.sourceMessage = messageID
+	return result, err
 }
+
+// A complete, unqualified question can use the requester's current queue directly.
+func requesterCountQuery(question string) OrderQuery {
+	switch question {
+	case "我的报修还有多少单未结束", "我的报修有多少单未结束", "我的报修还有几单未结束", "我的未结束工单有多少单":
+		return OrderQuery{Queue: "active", Period: "all"}
+	case "我的报修还有多少单待我处理", "我的报修有多少单待我处理", "我的报修还有几单待我处理", "我的报修还有多少单需要我处理":
+		return OrderQuery{Queue: "action", Period: "all"}
+	default:
+		return OrderQuery{}
+	}
+}
+
 func businessIntent(role, input string, previous *OrderQuery) (OrderQuery, bool) {
 	q := strings.TrimSpace(input)
 	query := OrderQuery{Queue: "all", Period: "all"}
 	if role != "requester" && role != "technician" && role != "admin" {
 		return query, false
 	}
-	if draftIntent(role, q, false) {
+	if draftIntent(role, q, false) || containsAny(q, "哪些类别", "哪些报修类别", "哪些故障类别", "哪些报修类型") && !strings.Contains(q, "工单") {
 		return query, false
 	}
 	if containsAny(q, "怎么", "如何", "流程", "制度", "规定", "安全", "资料", "时限", "多久", "几天", "多少时间", "多长时间", "多少钱") {
@@ -353,7 +549,19 @@ func businessIntent(role, input string, previous *OrderQuery) (OrderQuery, bool)
 	}
 	number := orderNumberPattern.FindString(q)
 	businessNoun := containsAny(q, "工单", "报修", "任务", "待办", "单子", "哪些单", "几单", "多少单", "有哪些活")
-	filterSignal := containsAny(q, "待审核", "等我审核", "待我确认", "待我补充", "没修完", "未完成", "待派单", "待接单", "处理中", "待补充", "待确认", "未结束", "没处理完", "已结束", "已关闭", "已取消", "已驳回", "今天", "全部类别", "全部状态", "不限日期", "全部日期", "所有日期")
+	period := ""
+	for _, item := range []struct {
+		period string
+		terms  []string
+	}{
+		{"today", []string{"今天", "今日"}}, {"yesterday", []string{"昨天", "昨日"}}, {"this_week", []string{"本周", "这周"}}, {"last_week", []string{"上周"}}, {"this_month", []string{"本月"}}, {"recent", []string{"最近一周", "近七天"}},
+	} {
+		if containsAny(q, item.terms...) {
+			period = item.period
+			break
+		}
+	}
+	filterSignal := period != "" || containsAny(q, "待审核", "等我审核", "待我确认", "待我补充", "没修完", "未完成", "待派单", "待接单", "处理中", "待补充", "待确认", "未结束", "没处理完", "已结束", "已关闭", "已取消", "已驳回", "今天", "全部类别", "全部状态", "不限日期", "全部日期", "所有日期")
 	count := containsAny(q, "多少", "几单", "几张", "几条", "数量", "统计", "概览", "有几", "总数", "总共")
 	shortFollowup := previous != nil && len([]rune(q)) <= 25 && (filterSignal || repairCategory(q) != "") && !businessNoun
 	explicit := number != "" || businessNoun && (count || filterSignal || containsAny(q, "待处理", "待我", "要处理", "需要处理", "需要我处理", "待办", "列出", "有哪些", "查", "查看"))
@@ -395,11 +603,13 @@ func businessIntent(role, input string, previous *OrderQuery) (OrderQuery, bool)
 		query.Queue = "all"
 		query.Status = ""
 	}
-	if strings.Contains(q, "今天") {
-		query.Period = "today"
+	if period != "" {
+		query.Period = period
+		query.DateFrom, query.DateTo = "", ""
 	}
 	if containsAny(q, "不限日期", "全部日期", "所有日期") {
 		query.Period = "all"
+		query.DateFrom, query.DateTo = "", ""
 	}
 	if number != "" {
 		query.Number = number
@@ -450,16 +660,16 @@ func queryClarification(role, input string, previous bool) string {
 	if !subject {
 		return ""
 	}
-	if containsAny(input, "昨天", "前天", "本周", "这周", "上周", "本月", "上个月", "最近一周", "近七天") {
-		return "目前可按今天或不限日期查询，今天按北京时间计算。你可以说“今天有多少待办工单”，或“不限日期的待办工单有多少”。"
+	if containsAny(input, "前天", "上个月") {
+		return "请给出具体的起止日期，或选择昨天、本周、上周、本月、近七天等范围。"
 	}
-	categories := 0
-	for _, hit := range []bool{containsAny(input, "照明", "灯"), containsAny(input, "电器", "插座", "空调"), containsAny(input, "给排水", "漏水", "水管", "水龙头")} {
-		if hit {
-			categories++
+	categories := map[string]bool{}
+	for _, part := range strings.FieldsFunc(input, func(r rune) bool { return strings.ContainsRune("和与及、，,或", r) }) {
+		if cat := repairCategory(part); cat != "" {
+			categories[cat] = true
 		}
 	}
-	if categories > 1 && containsAny(input, "多少", "几单", "哪些", "筛选", "查", "谁", "推荐") {
+	if len(categories) > 1 && containsAny(input, "多少", "几单", "哪些", "筛选", "查", "谁", "推荐") {
 		return "目前每次支持一个故障类别，也可以查询全部类别。你可以说“照明工单有多少”，或“全部类别的工单有多少”。"
 	}
 	return ""
@@ -502,4 +712,124 @@ func queryContains(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) messageOrderPage(w http.ResponseWriter, r *http.Request) {
+	u := current(r)
+	cid, err := parseID(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	c, err := s.ownConversation(r.Context(), u, cid)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	mid, err := strconv.ParseInt(r.PathValue("message"), 10, 64)
+	if err != nil || mid < 1 {
+		s.fail(w, r, invisible())
+		return
+	}
+	page, _, err := pagination(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var raw []byte
+	err = s.DB.QueryRowContext(r.Context(), "SELECT b.result FROM assistant_business_results b JOIN messages m ON m.id=b.message_id WHERE m.conversation_id=? AND m.id=? AND m.status='complete'", cid, mid).Scan(&raw)
+	if err == sql.ErrNoRows {
+		s.fail(w, r, invisible())
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var stored worklistSnapshot
+	if err = json.Unmarshal(raw, &stored); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	result := stored.BusinessResult
+	if n := r.URL.Query().Get("additional"); n != "" {
+		index, e := strconv.Atoi(n)
+		if e != nil || index < 0 || index >= len(result.Additional) {
+			s.fail(w, r, invisible())
+			return
+		}
+		result = result.Additional[index]
+	}
+	if (result.Kind != "orders" && result.Kind != "pre_review" && result.Kind != "worklist") || result.Query.Analysis != "" || result.At.IsZero() {
+		s.fail(w, r, invisible())
+		return
+	}
+	if err = mcpAllowed(r.Context(), s.DB, mcpClaims{AgentID: c.AgentID}, u, MCPQueryOrders); err != nil {
+		s.fail(w, r, denied())
+		return
+	}
+	var agent Agent
+	var skill *SkillRun
+	if result.Kind == "pre_review" || result.Kind == "worklist" {
+		if u.Role != "admin" || result.Kind == "pre_review" && result.Query.Status != "submitted" {
+			s.fail(w, r, denied())
+			return
+		}
+		agent, err = s.agent(r.Context(), u, c.AgentID, false)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if skill, err = s.selectSkill(r.Context(), u, agent, "", nil, MCPDispatch); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		claims := mcpClaims{AgentID: c.AgentID, Skill: skill.ID, DefinitionVersion: skill.DefinitionVersion, SkillVersion: skill.ConfigVersion}
+		if err = mcpAllowed(r.Context(), s.DB, claims, u, MCPDispatch); err != nil {
+			s.fail(w, r, denied())
+			return
+		}
+		if result.Kind == "worklist" {
+			stored.BusinessResult = result
+			items, total, number, supplemental, e := s.readWorklistPage(r.Context(), u, stored, page)
+			if e != nil {
+				s.fail(w, r, e)
+				return
+			}
+			send(w, 200, map[string]any{"items": items, "total": total, "page": number, "supplemental": supplemental})
+			return
+		}
+		snapshot, e := s.businessHistory(r.Context(), u, cid, mid, c.AgentID)
+		if e != nil {
+			s.fail(w, r, e)
+			return
+		}
+		if snapshot == nil || snapshot.Unavailable {
+			s.fail(w, r, invisible())
+			return
+		}
+		if n := r.URL.Query().Get("additional"); n != "" {
+			index, _ := strconv.Atoi(n)
+			if index < 0 || index >= len(snapshot.Additional) {
+				s.fail(w, r, invisible())
+				return
+			}
+			snapshot = &snapshot.Additional[index]
+		}
+		if r.URL.Query().Get("refresh") == "1" {
+			send(w, 200, snapshot)
+			return
+		}
+		count := len(snapshot.Items)
+		page = min(page, max(1, (count+4)/5))
+		start := (page - 1) * 5
+		send(w, 200, map[string]any{"items": snapshot.Items[start:min(start+5, count)], "total": count, "page": page})
+		return
+	}
+	fresh, err := queryOrderPage(r.Context(), s.DB, u, result.Query, result.At, page, time.Time{})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	send(w, 200, map[string]any{"items": fresh.Items, "total": fresh.Total, "page": min(page, max(1, (fresh.Total+4)/5))})
 }

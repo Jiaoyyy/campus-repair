@@ -27,9 +27,15 @@
 | GET /api/work-orders/{id} | 工单 ID | order、events、records |
 | GET /api/technicians | category；仅管理员 | items：id、display_name、category、pending_count |
 
-category 为 lighting、electrical、plumbing。位置 1 至 200 字，描述 1 至 2000 字，服务端去首尾空白。创建幂等键 8 至 100 字符，有效 24 小时；同用户同键不同内容返回 409。工单包含 number、status、version、归属、指派、时间和显示名称。
+category 支持 lighting（照明）、electrical（电器）、plumbing（给排水）、hvac（空调与通风）、doors_windows（门窗与锁具）、furniture（家具）、network（校园网络）、building（房屋设施）、other（其他）。位置 1 至 200 字，描述 1 至 2000 字，服务端去首尾空白。创建幂等键 8 至 100 字符，有效 24 小时；同用户同键不同内容返回 409。工单包含 number、status、version、归属、指派、时间和显示名称。
 
 所有动作使用 POST /api/work-orders/{id}/{action}，请求必须包含当前 version；成功返回更新后的 order。旧版本、非法状态或终态更新返回 409。
+
+### 工单现场附件
+
+- `POST /api/work-orders` 仍支持原 JSON 请求和助手草稿确认。普通表单和助手草稿均可使用 `multipart/form-data`。确认草稿时额外传入正整数文本字段 `draft_message_id` 与 `draft_version`，并使用草稿返回的幂等键。可重复的 `photo` 文件字段最多 6 个，允许 JPEG/PNG，原图每张最多 25 MiB；`video` 文件字段最多 1 个，允许 MP4/MOV，最多 20 MiB、15 秒。请求最大 81 MiB（含封装）。客户端应沿用原幂等键，成功 201，同内容重放 200，同键不同字段或附件 409。验证失败不会创建部分工单。
+- `GET /api/work-orders/{id}/media` 返回 `items`，每项包含 `id`、`kind`（`photo` / `video`）、`content_type`、`size`（保存版本字节数）。
+- `GET /api/work-orders/{id}/media/{media}` 返回规范化 JPEG 或 MP4，支持字节范围及 `Cache-Control: no-store`。列表和文件均要求 Bearer 认证，并按当前工单权限检查。改派后原维修人员的新请求返回 404。
 
 | action | 角色 | 状态及额外字段 |
 | --- | --- | --- |
@@ -48,7 +54,9 @@ category 为 lighting、electrical、plumbing。位置 1 至 200 字，描述 1 
 
 ## 审计与运行
 
-GET /api/audit 仅管理员，支持 resource_id、page、page_size，返回本组织 items、total。每项含请求标识、动作、操作者/资源 ID、结果、最小元数据及时间，不含登录凭据。
+`GET /api/audit` 仅管理员，返回本组织的 `items`、`total`、`page`、`page_size`。支持组合筛选 `actor_id`、`resource_id`、`action`、`outcome`、`request_id`、`date_from`、`date_to`。动作支持精确名称或 `work_order.*` 形式的动作组。日期使用北京时间，起止日均计入，两端均可单独指定。每项含请求标识、操作者、资源、结果、脱敏元数据及时间。
+
+`GET /api/work-orders/stats` 仅管理员，返回本组织工单 `total`、按状态的 `statuses`、按故障类别的 `categories`。统计包含组织内全部工单，使用同一次分组查询。工单列表 `location` 按字面子串匹配，百分号和下划线作为普通字符。
 
 GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数据库故障时前者 200、后者 503，Qdrant/模型尚未启用不会阻断人工流程。
 
@@ -95,9 +103,9 @@ GET /health/live 仅表示进程存活；GET /health/ready 检查数据库。数
 | PUT /api/agents/{id} | 仅管理员；name、role、prompt、enabled、version、material_ids、tool_names；冲突 409，越界绑定 400 |
 | GET /api/retrieval?agent_id=...&q=...&mode=... | 校验助手角色/组织/启用，限绑定且已发布材料；scope=agent_binding |
 | POST /api/conversations | agent_id；201 返回 conversation，创建时重读配置 |
-| GET /api/conversations | 仅本人，page/page_size 分页 |
+| GET /api/conversations | 仅本人，page/page_size 分页；可用 q 按标题字面子串搜索（最多 100 字） |
 | GET /api/conversations/{id}/messages | 仅本人；最近页默认 20 条，页内按时间顺序，返回 conversation/items/total/page |
-| POST /api/conversations/{id}/messages | content（1–2000 个 Unicode 字符）；fetch SSE，检索由服务端决定，不能自动重试 |
+| POST /api/conversations/{id}/messages | content（1–2000 个 Unicode 字符）；fetch SSE，管理员可带 review_ref（message_id、order_id）引用本会话已保存的初审工单；review_refreshed 为 true 时要求澄清卡片序号。检索由服务端决定，不能自动重试 |
 | GET /api/conversations/{id}/citations/{message}/{chunk} | 本人已完成消息实际引用且当前仍授权；返回 evidence 和完整原文 text，不可见 404 |
 
 会话所有权对管理员也适用；同组织他人的会话和不存在 ID 一样返回 404。助手停用后本人可读历史，但不能新发消息或打开失效来源。消息状态 pending/generating/complete/failed/cancelled；只有 complete 消息进入最近十条上下文。并发生成 409，无模型配置 503 + chat_unconfigured。
@@ -128,7 +136,7 @@ SSE `done` 及消息历史的完整助手消息新增可选 `draft`：
 
 ## 多场景业务查询（2026-10-23）
 
-新增只读 MCP 工具 `query_work_orders`，三角色均可绑定，但结果仍分别限定本人报修、当前指派任务、本组织工单。参数仅 `{queue, status, category, number, period, location, keyword, date_from, date_to}`：queue为all/action/active/finished，status为现有状态码，category为三类故障，number为完整工单号，period为all/today/recent/yesterday/this_week/last_week/this_month；location/keyword为最多200字的字面子串，date_from/date_to为含起止日最多366天的北京时间日期，不能与相对period混用。不接受用户、组织、角色、任意SQL或写动作。默认种子助手通过一次性迁移6绑定；管理员解绑后重启不恢复，自定义助手仍需发现后绑定。
+新增只读 MCP 工具 `query_work_orders`，三角色均可绑定，但结果仍分别限定本人报修、当前指派任务、本组织工单。参数仅 `{queue, status, category, number, period, location, keyword, date_from, date_to}`：queue为all/action/active/finished，status为现有状态码，category为以上工单类别，number为完整工单号，period为all/today/recent/yesterday/this_week/last_week/this_month；location/keyword为最多200字的字面子串，date_from/date_to为含起止日最多366天的北京时间日期，不能与相对period混用。不接受用户、组织、角色、任意SQL或写动作。默认种子助手通过一次性迁移6绑定；管理员解绑后重启不恢复，自定义助手仍需发现后绑定。
 
 数量基于完整授权匹配集，列表最多5条。`action`复用页面口径：报修人待补充/待确认，维修人员待接单/处理中，管理员待审核/待派单。今天按Asia/Shanghai自然日换算UTC：报修人/管理员按创建时间，维修人员按当前指派最近一次assign/reassign事件。模型决策支持上周等相对日期及明确日期范围，返回实际起止日期；原有无模型关键词降级仍限今天或不限日期。
 
@@ -159,6 +167,7 @@ SSE在meta之后可发送兼容可忽略的 `phase` 事件，data为 `{message}`
 - `GET /api/work-orders/{id}/visit`：返回`context`、工单`version`、当前用户`allowed_actions`、`as_of`。context包含`availability_start/end`、有效`visit`（id/start/end/stage/departed_at/arrived_at）、`exception/reason/expected_resume_at`、`needs_availability`及`revisit_required`。无预约为null；历史在工单时间线保留。
 - `PUT /api/work-orders/{id}/visit/availability`：仅本人报修人，body为`version,start,end,reason`；start/end同时为null表示清除。开始须在未来14天内、时长30分钟至4小时，使用RFC3339带时区时间。已确认预约调整需原因并撤销旧预约；出发/到场后不能修改。
 - `POST /api/work-orders/{id}/visit/actions/{action}`：仅接单后的当前维修人员，body均含version。schedule附start/end（位于最新偏好内，改已有预约需reason）；depart/arrive记录服务端时间；no-show须先到场并附reason；wait-parts附reason及未来expected_resume_at；resume附reason且仅恢复待备件。出发时已过预约结束时间返回409，已出发后允许迟到到场。
+- `POST /api/work-orders/{id}/visit/actions/schedule` 确认或调整预约时，如果与该维修员另一张工单的有效预约重叠，返回 `409 visit_overlap`。原预约和工单版本保留，可换时段重试。前一预约结束时即可开始下一单。
 - 上门写入成功返回`{version: 新版本}`，客户端重新读取工单和上门信息。未知字段/非法时间为400，禁止角色403，不可见404，旧版本/非法阶段409，依赖或审计失败503且整体回滚。网络结果未知时先重读，不自动重放写操作。
 - 白跑后必须本人重新提供时间并完成新预约到场才能结单。待备件期间禁止结单；恢复不清除既存的重新上门要求。改派、重处理和终止动作撤销现行预约，历史不删除。
 
@@ -177,3 +186,35 @@ SSE在meta之后可发送兼容可忽略的 `phase` 事件，data为 `{message}`
 - `GET /api/repair-workbench/metrics?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD`仅管理员；缺省近7天含今天，指定时须同时提供日期，最长366天。counts含当前overdue/parts及区间内no_show。白跑按本组织唯一预约的no_show_at北京时间日期计次，不按改约、备件或重试计数。返回实际日期范围和as_of，不代表全校白跑率或改善比例。
 
 隔离验收：`python3 apitest/verify_visits.py`，仅固定的draft-check模拟依赖环境；不向真实网关发送请求。
+
+## 技能配置接口（2026-11-17 实施中）
+
+- `GET /api/skills`，本组织管理员读取三项内置定义及enabled/version。
+- `PUT /api/skills/{skill_id}`，提交enabled和version；组织内生效，版本过期409，普通角色403。
+- `PUT /api/agents/{id}`，新增可选skill_bindings数组，元素为skill_id及enabled；省略保留、空数组清空，与原助手version事务提交。非法或重复技能、角色不匹配400，跨组织404。
+
+定义标识为repair_intake、safe_self_check、dispatch_advice。前两项分别适用于报修人、全部三角色，派单辅助仅管理员。配置能力与技能执行进度分别按OpenSpec任务核对。
+
+内部MCP工具已增加get_work_order_detail、get_work_order_visit、search_repair_knowledge，参数及返回范围见MCP说明。工单筛选参数include_next_steps为可选布尔，其他原字符串参数继续严格校验重复、null、类型和未知字段。
+
+
+对话meta的skill为实际标识或none，skill_version为定义版本。done及历史消息的可选skill对象包含skill_id、skill_version、config_version。旧记录缺少该对象时按未记录兼容。
+
+business增加detail/visit结果种类、可选detail和warning。detail含order、version、next_step、最近维修记录、按需events/next_cursor/has_more及可选visit/latest_visit；unavailable表示当前归属或角色已无法查看，历史内容及不可见详情被清除。正常页面打开和所有写入仍重新校验。
+
+
+### 自然业务回答及证据
+
+- SSE `done.answer` 与对话历史 `content` 保存模型写的正文。业务快照中 `natural: true` 表示通过检查的自然正文。`warning` 描述补查或部分正文缺失。`additional` 是按实际获得顺序追加的只读业务快照。
+- `analysis.facts[].time_basis` 对应单项指标的口径。`analysis.related` 按指标 ID 给出 `total`、`items` 与可选的 `next_cursor`。关联工单概要附当时的 `version` 和当前指派人员 `responsible`（如有）。省略这些可选字段的旧快照仍可读。
+- 发布前复核会话、配置和关联工单归属与版本。历史快照中的自然正文在关联工单失去访问权限时一并隐藏。材料引用继续使用当前授权原文查询接口。
+
+报修求助的 SSE 完成事件可以同时包含 `draft` 和 `citations`。描述由用户现象片段整理，生成或补全草稿仍需本人通过原确认接口提交。
+
+## 助手消息内的工单分页
+
+`GET /api/conversations/{id}/messages/{message}/orders?page=2` 读取该消息中工单查询的当前结果，每页 5 单，可用 `additional` 指定从零计数的附加结果。日期基于原查询时间，服务端重新检查会话归属、工具授权及工单可见范围。返回 `items`、`total`、`page`，超出末页时返回最后一页。
+
+逐单建议卡的分页复用该接口。新卡读取原建议快照，返回本页工单的当前状态和版本。仅保存首批的旧卡按原查询时间与筛选补查，跳过已保存的首批及查询后创建的工单，补查页返回 `supplemental: true`。
+
+初审卡的消息工单接口传入 `refresh=1` 返回原消息的完整已保存快照。各行附带 `current_status` 和 `current_version`，与历史 `status` 和 `version` 分开。该操作只读。

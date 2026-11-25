@@ -1,3 +1,4 @@
+import { statusNames } from './api';
 import { useEffect, useId, useRef } from 'react';
 import type { ReactNode } from 'react';
 
@@ -10,6 +11,7 @@ export function Icon({ kind = 'orders' }: { kind?: string }) {
   chat: <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"/>,
   settings: <><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3" fill="currentColor" stroke="none"/><circle cx="16" cy="17" r="3" fill="currentColor" stroke="none"/></>,
   book: <><path d="M12 5v16M3 4h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v15h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3Z"/></>,
+  history: <><path d="M3 12a9 9 0 1 1 2.6 6.4M3 12V6m0 6h6"/><path d="M12 7v5l3 2"/></>,
   audit: <><path d="M9 3h9a2 2 0 0 1 2 2v16H4V5a2 2 0 0 1 2-2h3M8 8h8M8 12h8M8 16h5"/></>,
   close: <path d="m6 6 12 12M6 18 18 6"/>, menu: <path d="M4 6h16M4 12h16M4 18h16"/>,
   refresh: <><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></>,
@@ -49,9 +51,46 @@ export function Drawer({ title, onClose, children }: { title: string; onClose: (
  }, []);
  return <div className="drawer-layer"><div className="drawer-backdrop" onClick={onClose}/><section ref={panel} className="drawer" role="dialog" aria-modal="true" aria-labelledby={heading}><div className="drawer-heading"><h2 id={heading}>{title}</h2><button type="button" data-drawer-close className="icon-button" aria-label="关闭侧栏" onClick={onClose}><Icon kind="close"/></button></div><div className="drawer-content">{children}</div></section></div>;
 }
+export function LeaveConfirmation({ title, description, discardLabel = '放弃更改并继续', onCancel, onDiscard }: {
+ title: string; description: string; discardLabel?: string; onCancel: () => void; onDiscard: () => void;
+}) {
+ const heading = useId(), message = useId();
+ const panel = useRef<HTMLDialogElement>(null), keepEditing = useRef<HTMLButtonElement>(null);
+ useEffect(() => {
+  const dialog = panel.current;
+  if (!dialog) return;
+  const previous = document.activeElement;
+  const overflow = document.body.style.overflow;
+  dialog.showModal();
+  document.body.style.overflow = 'hidden';
+  keepEditing.current?.focus();
+  return () => {
+   dialog.close();
+   document.body.style.overflow = overflow;
+   if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true });
+  };
+ }, []);
+
+ return <dialog ref={panel} className="leave-confirmation" aria-labelledby={heading} aria-describedby={message} onCancel={event => {
+  event.preventDefault();
+  onCancel();
+ }}>
+  <header><h2 id={heading}>{title}</h2><button type="button" className="icon-button" aria-label="关闭弹窗" onClick={onCancel}><Icon kind="close"/></button></header>
+  <p id={message}>{description}</p>
+  <div className="leave-confirmation-actions">
+   <button ref={keepEditing} type="button" onClick={onCancel}>继续编辑</button>
+   <button type="button" className="danger" onClick={onDiscard}>{discardLabel}</button>
+  </div>
+ </dialog>;
+}
+
 export function OriginalText({ text, start, end }: { text: string; start?: number; end?: number }) {
  const pre = useRef<HTMLPreElement>(null);
  useEffect(() => { const mark = pre.current?.querySelector('mark'); if (pre.current && mark) pre.current.scrollTop = mark.offsetTop - 60; }, [text, start, end]);
  const chars = [...text];
  return <pre className="original-text" ref={pre} tabIndex={0}>{start !== undefined && end !== undefined ? <>{chars.slice(0, start).join('')}<mark>{chars.slice(start, end).join('')}</mark>{chars.slice(end).join('')}</> : text}</pre>;
+}
+
+export function Badge({ status, label }: { status: string; label?: string }) {
+ return <span className={`badge ${status}`}>{label ?? statusNames[status] ?? '状态待确认'}</span>;
 }

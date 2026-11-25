@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type Message struct {
 	Refs      []CitationRef   `json:"-"`
 	Draft     *RepairDraft    `json:"draft,omitempty"`
 	Business  *BusinessResult `json:"business,omitempty"`
+	Skill     *SkillRun       `json:"skill,omitempty"`
 }
 
 func (s *Server) ownConversation(ctx context.Context, u User, id int64) (Conversation, error) {
@@ -49,12 +51,23 @@ func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := current(r)
+	keyword := strings.TrimSpace(r.URL.Query().Get("q"))
+	if utf8.RuneCountInString(keyword) > 100 {
+		s.fail(w, r, bad("搜索词最多 100 个字"))
+		return
+	}
+	where := " WHERE c.org_id=? AND c.owner_id=?"
+	args := []any{u.OrgID, u.ID}
+	if keyword != "" {
+		where += " AND LOCATE(?,c.title)>0"
+		args = append(args, keyword)
+	}
 	var total int
-	if err = s.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM conversations WHERE org_id=? AND owner_id=?", u.OrgID, u.ID).Scan(&total); err != nil {
+	if err = s.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM conversations c"+where, args...).Scan(&total); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	rows, err := s.DB.QueryContext(r.Context(), "SELECT c.id,c.agent_id,c.title,a.name,c.updated_at FROM conversations c JOIN agents a ON a.id=c.agent_id WHERE c.org_id=? AND c.owner_id=? ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?", u.OrgID, u.ID, size, (page-1)*size)
+	rows, err := s.DB.QueryContext(r.Context(), "SELECT c.id,c.agent_id,c.title,a.name,c.updated_at FROM conversations c JOIN agents a ON a.id=c.agent_id AND a.org_id=c.org_id"+where+" ORDER BY c.updated_at DESC,c.id DESC LIMIT ? OFFSET ?", append(args, size, (page-1)*size)...)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -188,7 +201,17 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	for i := range items {
 		m := &items[i]
 		if m.Role == "assistant" && m.Status == "complete" {
-			m.Business, err = s.businessHistory(r.Context(), u, id, m.ID)
+			var run SkillRun
+			skillErr := s.DB.QueryRowContext(r.Context(), "SELECT skill_id,definition_version,config_version FROM message_skill_runs WHERE message_id=?", m.ID).Scan(&run.ID, &run.DefinitionVersion, &run.ConfigVersion)
+			if skillErr != nil && skillErr != sql.ErrNoRows {
+				s.fail(w, r, skillErr)
+				return
+			}
+			if skillErr == nil {
+				m.Skill = &run
+			}
+
+			m.Business, err = s.businessHistory(r.Context(), u, id, m.ID, c.AgentID)
 			if err != nil {
 				s.fail(w, r, err)
 				return
@@ -203,6 +226,16 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, e)
 				return
 			}
+			if m.Business != nil && m.Business.Unavailable {
+				content = "这张工单当前不可查看。"
+				citations = []Citation{}
+			}
+			if u.Role == "technician" && m.Business != nil && m.Business.Kind == "orders" &&
+				(m.Business.Warning == partialExplanationNotice || m.Business.Warning == unverifiedExplanationNotice) {
+				content = technicianOrderSummary(*m.Business)
+				m.Business.Warning = ""
+				m.Business.Natural = false
+			}
 			m.Content = content
 			m.Citations = citations
 			if warning != "" {
@@ -216,19 +249,46 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	send(w, 200, map[string]any{"conversation": c, "items": items, "total": total, "page": page})
 }
 func (s *Server) recoverExpired(ctx context.Context) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	// Lock conversations in the same order as beginTurn and finishTurn. Concurrent
+	// readers should not upgrade shared locks over every healthy conversation.
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, "UPDATE messages m JOIN conversations c ON c.id=m.conversation_id AND c.generation_token=m.turn_token SET m.status='failed',m.warning='上次生成已中断，请重新提问' WHERE c.generation_token<>'' AND c.generation_until<UTC_TIMESTAMP(6) AND m.status IN ('pending','generating')")
-	if err == nil {
-		_, err = tx.ExecContext(ctx, "UPDATE conversations SET generation_token='',generation_until=NULL WHERE generation_token<>'' AND generation_until<UTC_TIMESTAMP(6)")
+	rows, err := tx.QueryContext(ctx, "SELECT id,generation_token FROM conversations WHERE generation_token<>'' AND generation_until<UTC_TIMESTAMP(6) ORDER BY id FOR UPDATE")
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		err = tx.Commit()
+	type lease struct {
+		id    int64
+		token string
 	}
-	return err
+	var expired []lease
+	for rows.Next() {
+		var l lease
+		if err = rows.Scan(&l.id, &l.token); err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, l)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, l := range expired {
+		_, err = tx.ExecContext(ctx, "UPDATE messages SET status='failed',warning='上次生成已中断，请重新提问' WHERE conversation_id=? AND turn_token=? AND status IN ('pending','generating')", l.id, l.token)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE conversations SET generation_token='',generation_until=NULL WHERE id=?", l.id)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func (s *Server) RecoverConversations(ctx context.Context) {
 	tick := time.NewTicker(15 * time.Second)
@@ -244,8 +304,10 @@ func (s *Server) RecoverConversations(ctx context.Context) {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content"`
+	ToolCalls  []gatewayToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
 }
 type Turn struct {
 	ConversationID, MessageID int64
@@ -255,9 +317,11 @@ type Turn struct {
 	History                   []chatMessage
 	Draft                     *Input
 	Business                  *BusinessResult
+	Skill                     *SkillRun
+	Performance               *turnPerformance
 }
 
-func (s *Server) beginTurn(ctx context.Context, u User, c Conversation, input string, request string) (Turn, error) {
+func (s *Server) beginTurn(ctx context.Context, u User, c Conversation, input string, request string, reviewSource, reviewOrder int64) (Turn, error) {
 	var turn Turn
 	turn.ConversationID = c.ID
 	turn.Token = randomHex(16)
@@ -270,12 +334,16 @@ func (s *Server) beginTurn(ctx context.Context, u User, c Conversation, input st
 	}
 	defer tx.Rollback()
 	var locked string
-	err = tx.QueryRowContext(ctx, "SELECT generation_token FROM conversations WHERE id=? AND org_id=? AND owner_id=? FOR UPDATE", c.ID, u.OrgID, u.ID).Scan(&locked)
+	var updated time.Time
+	err = tx.QueryRowContext(ctx, "SELECT generation_token,updated_at FROM conversations WHERE id=? AND org_id=? AND owner_id=? FOR UPDATE", c.ID, u.OrgID, u.ID).Scan(&locked, &updated)
 	if err != nil {
 		return turn, dbError(err)
 	}
 	if locked != "" {
 		return turn, &Problem{409, "generating", "这段对话正在生成回答，请等待完成或停止生成"}
+	}
+	if reviewSource != 0 && !updated.Equal(c.Updated) {
+		return turn, &Problem{409, "conversation_changed", "这段对话刚有新消息，请重新读取后追问"}
 	}
 	turn.Agent, err = scanAgent(tx.QueryRowContext(ctx, "SELECT "+agentColumns+" FROM agents WHERE id=? AND org_id=? FOR SHARE", c.AgentID, u.OrgID))
 	if err != nil {
@@ -287,7 +355,7 @@ func (s *Server) beginTurn(ctx context.Context, u User, c Conversation, input st
 	if !turn.Agent.Enabled {
 		return turn, &Problem{409, "agent_disabled", "该助手已停用，请返回人工报修"}
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT role,content FROM messages WHERE conversation_id=? AND status='complete' ORDER BY id DESC LIMIT 10", c.ID)
+	rows, err := tx.QueryContext(ctx, "SELECT m.role,CASE WHEN b.message_id IS NULL OR (m.id=? AND ?=0) OR (JSON_UNQUOTE(JSON_EXTRACT(b.result,'$.kind'))='discuss_pre_review' AND JSON_EXTRACT(b.result,'$.review_source')=? AND (?=0 OR JSON_EXTRACT(b.result,'$.review_order')=?)) THEN m.content ELSE '历史业务结果须按当前权限重新查询，不能作为本轮事实。' END FROM messages m LEFT JOIN assistant_business_results b ON b.message_id=m.id WHERE m.conversation_id=? AND m.status='complete' ORDER BY m.id DESC LIMIT 10", reviewSource, reviewOrder, reviewSource, reviewOrder, reviewOrder, c.ID)
 	if err != nil {
 		return turn, err
 	}
@@ -350,6 +418,7 @@ func (s *Server) savePartial(ctx context.Context, t Turn, text string) error {
 func (s *Server) finishTurn(t Turn, u User, status, text, warning, request string, refs []CitationRef) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	defer recordStage(context.WithValue(ctx, performanceKey{}, t.Performance), "finalize", time.Now())
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -368,10 +437,33 @@ func (s *Server) finishTurn(t Turn, u User, status, text, warning, request strin
 		if err != nil || !enabled || role != u.Role || version != t.Agent.Version {
 			return &Problem{409, "configuration_changed", "助手配置已变化，请重新提问"}
 		}
+		if t.Skill != nil {
+			var enabled, bound bool
+			var skillVersion int64
+			err = tx.QueryRowContext(ctx, "SELECT sk.enabled,b.enabled,sk.version FROM skills sk JOIN agent_skills b ON b.skill_id=sk.skill_id JOIN agents a ON a.id=b.agent_id AND a.org_id=sk.org_id WHERE sk.org_id=? AND sk.skill_id=? AND a.id=? FOR SHARE", u.OrgID, t.Skill.ID, t.Agent.ID).Scan(&enabled, &bound, &skillVersion)
+			definition, ok := skillDefinition(t.Skill.ID)
+			if err != nil || !enabled || !bound || !ok || !skillRoleAllowed(t.Skill.ID, u.Role) || skillVersion != t.Skill.ConfigVersion || definition.DefinitionVersion != t.Skill.DefinitionVersion {
+				return &Problem{409, "configuration_changed", "技能配置已变化，本轮结果未确认"}
+			}
+		}
 		var live int64
 		err = tx.QueryRowContext(ctx, "SELECT u.id FROM sessions se JOIN users u ON u.id=se.user_id WHERE se.token_hash=? AND se.expires_at>UTC_TIMESTAMP(6) AND u.id=? AND u.org_id=? AND u.role=? AND u.enabled=TRUE FOR SHARE", t.SessionHash, u.ID, u.OrgID, u.Role).Scan(&live)
 		if err != nil {
 			return &Problem{409, "identity_changed", "登录身份已失效，本轮回答未确认"}
+		}
+		if t.Business != nil {
+			for _, item := range t.Business.evidenceOrders() {
+				order, e := scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=? FOR SHARE", item.ID))
+				if e != nil || !visible(u, order) {
+					return &Problem{409, "identity_changed", "工单归属已变化，本轮结果未确认"}
+				}
+				if item.Version > 0 && order.Version != item.Version {
+					return conflict()
+				}
+				if item.Next != nil && item.Next.EvidenceID != fmt.Sprintf("order:%d:v%d", order.ID, order.Version) {
+					return conflict()
+				}
+			}
 		}
 		scope, args := knowledgeScope(u, t.Agent.ID)
 		for _, ref := range refs {
@@ -382,8 +474,32 @@ func (s *Server) finishTurn(t Turn, u User, status, text, warning, request strin
 			}
 		}
 	}
+	if status == "complete" && t.Skill != nil {
+		evidence := []any{}
+		for _, ref := range refs {
+			evidence = append(evidence, map[string]any{"chunk_id": ref.ChunkID, "generation": ref.Generation})
+		}
+		if t.Business != nil {
+			for _, item := range t.Business.evidenceOrders() {
+				evidence = append(evidence, map[string]any{"order_id": item.ID})
+			}
+			for _, candidate := range t.Business.Candidates {
+				evidence = append(evidence, map[string]any{"candidate_id": candidate.ID})
+			}
+		}
+		evidenceJSON, e := json.Marshal(evidence)
+		if e != nil {
+			return e
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO message_skill_runs(message_id,skill_id,definition_version,config_version,agent_version,evidence) VALUES(?,?,?,?,?,?)", t.MessageID, t.Skill.ID, t.Skill.DefinitionVersion, t.Skill.ConfigVersion, t.Agent.Version, string(evidenceJSON)); err != nil {
+			return err
+		}
+		if err = writeAudit(ctx, tx, request, &u, "skill.execute", t.MessageID, "success", map[string]any{"skill": t.Skill.ID, "definition_version": t.Skill.DefinitionVersion, "config_version": t.Skill.ConfigVersion, "agent_version": t.Agent.Version}); err != nil {
+			return err
+		}
+	}
 	if status == "complete" && t.Business != nil {
-		raw, e := json.Marshal(t.Business)
+		raw, e := json.Marshal(worklistSnapshot{BusinessResult: *t.Business, Rows: t.Business.worklistRows})
 		if e != nil {
 			return e
 		}

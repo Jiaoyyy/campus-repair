@@ -19,6 +19,24 @@ var schema string
 func Initialize(db *sql.DB, c Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// Keep concurrent API startups from installing the same one-time migration.
+	lock, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	var acquired int
+	if err = lock.QueryRowContext(ctx, "SELECT GET_LOCK(CONCAT(DATABASE(), ':initialize'),10)").Scan(&acquired); err != nil {
+		return err
+	}
+	if acquired != 1 {
+		return fmt.Errorf("schema initialization lock unavailable")
+	}
+	defer func() {
+		releaseCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		_, _ = lock.ExecContext(releaseCtx, "DO RELEASE_LOCK(CONCAT(DATABASE(), ':initialize'))")
+	}()
 	for _, statement := range strings.Split(schema, ";") {
 		if strings.TrimSpace(statement) != "" {
 			if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -97,6 +115,29 @@ func Initialize(db *sql.DB, c Config) error {
 			return err
 		}
 	}
+	// Extend qualifications only for the two known demo technicians. The
+	// migration marker prevents startup from recreating a removed assignment.
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version=10").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		for name, categories := range map[string][]string{
+			"tech":  {"hvac", "building", "other"},
+			"tech2": {"doors_windows", "furniture", "network"},
+		} {
+			for _, category := range categories {
+				if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO technician_categories(user_id,category) SELECT id,? FROM users WHERE username=? AND org_id=1 AND role='technician'", category, name); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations VALUES(10,UTC_TIMESTAMP(6))"); err != nil {
+			return err
+		}
+	}
+	if err = initializeSkills(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -140,9 +181,9 @@ type draftConfirmation struct {
 }
 
 func (s *Server) create(ctx context.Context, u User, i Input, key, requestID string) (Order, bool, error) {
-	return s.createWithDraft(ctx, u, i, key, requestID, draftConfirmation{})
+	return s.createWithDraft(ctx, u, i, key, requestID, draftConfirmation{}, nil)
 }
-func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requestID string, ref draftConfirmation) (Order, bool, error) {
+func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requestID string, ref draftConfirmation, media []repairMedia) (Order, bool, error) {
 	var o Order
 	if u.Role != "requester" {
 		return o, false, denied()
@@ -154,6 +195,10 @@ func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requ
 		return o, false, bad("提交需要8至100字符的幂等键")
 	}
 	body, _ := json.Marshal(i)
+	for _, item := range media {
+		body = append(body, item.kind...)
+		body = append(body, item.digest[:]...)
+	}
 	digest := sha256.Sum256(body)
 	hash := hex.EncodeToString(digest[:])
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -179,6 +224,16 @@ func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requ
 			return o, false, draftConflict()
 		}
 		if d.Status == "submitted" && d.OrderID != nil {
+			// The submit audit survives expiry of the short-lived idempotency record.
+			// Drafts submitted before attachment support only accepted text.
+			var storedHash sql.NullString
+			err = tx.QueryRowContext(ctx, "SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.request_hash')) FROM audit_events WHERE org_id=? AND actor_id=? AND action='draft.submit' AND resource_id=? ORDER BY id DESC LIMIT 1", u.OrgID, u.ID, d.MessageID).Scan(&storedHash)
+			if err != nil {
+				return o, false, err
+			}
+			if (storedHash.Valid && storedHash.String != hash) || (!storedHash.Valid && len(media) > 0) {
+				return o, false, &Problem{409, "idempotency_conflict", "同一提交标识的内容已变化，请查看已提交的工单"}
+			}
 			o, err = scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=? AND org_id=? AND requester_id=?", *d.OrderID, u.OrgID, u.ID))
 			if err != nil {
 				return o, false, err
@@ -200,7 +255,7 @@ func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requ
 		}
 		_, e := tx.ExecContext(ctx, "UPDATE repair_drafts SET status='submitted',order_id=? WHERE message_id=?", id, draft.MessageID)
 		if e == nil {
-			e = writeAudit(ctx, tx, requestID, &u, "draft.submit", draft.MessageID, "success", map[string]any{"work_order_id": id, "version": draft.Version})
+			e = writeAudit(ctx, tx, requestID, &u, "draft.submit", draft.MessageID, "success", map[string]any{"work_order_id": id, "version": draft.Version, "request_hash": hash})
 		}
 		return e
 	}
@@ -232,6 +287,34 @@ func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requ
 		s.enrich(ctx, &o)
 		return o, true, nil
 	}
+	var sourceRecord int64
+	if i.SourceOrderID != 0 || i.SourceVersion != 0 {
+		if ref.MessageID != 0 || i.SourceOrderID < 1 || i.SourceVersion < 1 {
+			return o, false, bad("复发报修关联无效")
+		}
+		source, e := scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=? AND org_id=? AND requester_id=? FOR UPDATE", i.SourceOrderID, u.OrgID, u.ID))
+		if e != nil {
+			return o, false, dbError(e)
+		}
+		if source.Status != "closed" || source.Version != i.SourceVersion {
+			return o, false, conflict()
+		}
+		sourceRecord, e = latestRepairID(ctx, tx, source.ID)
+		if e != nil {
+			return o, false, e
+		}
+		if sourceRecord == 0 {
+			return o, false, conflict()
+		}
+		var child int64
+		e = tx.QueryRowContext(ctx, "SELECT work_order_id FROM work_order_recurrences WHERE source_record_id=?", sourceRecord).Scan(&child)
+		if e == nil {
+			return o, false, &Problem{409, "recurrence_exists", "这次维修已有复发报修，请打开原工单查看。"}
+		}
+		if e != sql.ErrNoRows {
+			return o, false, e
+		}
+	}
 	number := "RP" + time.Now().UTC().Format("20060102") + randomHex(8)
 	res, err := tx.ExecContext(ctx, "INSERT INTO work_orders(number,org_id,requester_id,category,location,description,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'submitted',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))", number, u.OrgID, u.ID, i.Category, i.Location, i.Description)
 	if err != nil {
@@ -241,13 +324,28 @@ func (s *Server) createWithDraft(ctx context.Context, u User, i Input, key, requ
 	if err != nil {
 		return o, false, err
 	}
+	if sourceRecord != 0 {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO work_order_recurrences(work_order_id,source_order_id,source_record_id) VALUES(?,?,?)", id, i.SourceOrderID, sourceRecord); err != nil {
+			return o, false, err
+		}
+	}
+	for _, item := range media {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO work_order_media(work_order_id,kind,content_type,content) VALUES(?,?,?,?)", id, item.kind, item.contentType, item.data); err != nil {
+			return o, false, err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, "UPDATE idempotency_records SET work_order_id=? WHERE org_id=? AND user_id=? AND idem_key=?", id, u.OrgID, u.ID, key); err != nil {
 		return o, false, err
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT INTO work_order_events(work_order_id,actor_id,action,from_status,to_status,note,created_at) VALUES(?,?,'create','','submitted','',UTC_TIMESTAMP(6))", id, u.ID); err != nil {
 		return o, false, err
 	}
-	if err = writeAudit(ctx, tx, requestID, &u, "work_order.create", id, "success", map[string]any{"to": "submitted"}); err != nil {
+	metadata := map[string]any{"to": "submitted", "media_count": len(media)}
+	if sourceRecord != 0 {
+		metadata["source_order_id"] = i.SourceOrderID
+		metadata["source_record_id"] = sourceRecord
+	}
+	if err = writeAudit(ctx, tx, requestID, &u, "work_order.create", id, "success", metadata); err != nil {
 		return o, false, err
 	}
 	o, err = scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=?", id))
@@ -291,12 +389,13 @@ func (s *Server) update(ctx context.Context, u User, id int64, action string, a 
 	}
 	assignee := o.AssigneeID
 	if action == "assign" || action == "reassign" {
-		var count int
-		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM users u JOIN technician_categories c ON c.user_id=u.id WHERE u.id=? AND u.org_id=? AND u.enabled=TRUE AND u.role='technician' AND c.category=?", a.TechnicianID, u.OrgID, o.Category).Scan(&count); err != nil {
-			return o, err
-		}
-		if count != 1 {
+		var qualifiedID int64
+		err = tx.QueryRowContext(ctx, "SELECT u.id FROM users u JOIN technician_categories c ON c.user_id=u.id WHERE u.id=? AND u.org_id=? AND u.enabled=TRUE AND u.role='technician' AND c.category=? FOR SHARE", a.TechnicianID, u.OrgID, o.Category).Scan(&qualifiedID)
+		if err == sql.ErrNoRows {
 			return o, bad("维修人员不可用或类别不匹配")
+		}
+		if err != nil {
+			return o, err
 		}
 		if assignee != nil && *assignee == a.TechnicianID && action == "reassign" {
 			return o, bad("请选择另一名维修人员")
@@ -332,7 +431,17 @@ func (s *Server) update(ctx context.Context, u User, id int64, action string, a 
 	if _, err = tx.ExecContext(ctx, "INSERT INTO work_order_events(work_order_id,actor_id,action,from_status,to_status,note,assignee_id,created_at) VALUES(?,?,?,?,?,?,?,UTC_TIMESTAMP(6))", id, u.ID, action, o.Status, next, note, assignee); err != nil {
 		return o, err
 	}
-	if err = writeAudit(ctx, tx, requestID, &u, "work_order."+action, id, "success", map[string]any{"from": o.Status, "to": next, "assignee_id": assignee, "version": a.Version + 1}); err != nil {
+	metadata := map[string]any{"from": o.Status, "to": next, "assignee_id": assignee, "version": a.Version + 1}
+	if action == "reopen" {
+		record, e := latestRepairID(ctx, tx, id)
+		if e != nil {
+			return o, e
+		}
+		if record != 0 {
+			metadata["source_record_id"] = record
+		}
+	}
+	if err = writeAudit(ctx, tx, requestID, &u, "work_order."+action, id, "success", metadata); err != nil {
 		return o, err
 	}
 	o, err = scanOrder(tx.QueryRowContext(ctx, "SELECT "+orderColumns+" FROM work_orders WHERE id=?", id))

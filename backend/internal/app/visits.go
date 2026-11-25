@@ -289,6 +289,24 @@ func (s *Server) visitWrite(w http.ResponseWriter, r *http.Request) {
 			_, err = tx.ExecContext(ctx, "UPDATE work_order_visit_context SET availability_start=?,availability_end=?,needs_availability=? WHERE work_order_id=?", a.Start, a.End, a.Start == nil && v.Exception == "no_show", id)
 		}
 	case "schedule":
+		// Different orders have different locks. Serialize bookings for one technician
+		// before reading other appointments in this READ COMMITTED transaction.
+		var technicianID int64
+		if err = tx.QueryRowContext(ctx, "SELECT id FROM users WHERE id=? AND org_id=? AND enabled=TRUE FOR UPDATE", u.ID, u.OrgID).Scan(&technicianID); err != nil {
+			s.fail(w, r, dbError(err))
+			return
+		}
+		var overlaps bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM work_order_visits v JOIN work_order_visit_context c ON c.active_visit_id=v.id
+			WHERE v.technician_id=? AND v.work_order_id<>? AND v.stage IN ('scheduled','departed','arrived') AND v.starts_at<? AND v.ends_at>?)`, technicianID, id, a.End, a.Start).Scan(&overlaps)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if overlaps {
+			s.fail(w, r, &Problem{409, "visit_overlap", "该时段与本人另一项上门预约重叠，请选择其他时段。"})
+			return
+		}
 		err = endVisit(ctx, tx, id, "voided", a.Reason)
 		if err == nil {
 			var res sql.Result

@@ -1,4 +1,4 @@
-name: campus-repair
+name: ${COMPOSE_PROJECT_NAME:-campus-repair}
 services:
   db:
     image: mysql:8.0
@@ -25,13 +25,14 @@ services:
     volumes: ["uploads:/data/uploads"]
     restart: "no"
   api:
-    image: campus-repair-api:latest
+    image: ${BACKEND_IMAGE:-campus-repair-api:latest}
     build: ./backend
     environment: &backend-env
       CHAT_BASE_URL: ${CHAT_BASE_URL:-}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-115}
+      CHAT_TOOL_THINKING_MODE: ${CHAT_TOOL_THINKING_MODE:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
@@ -63,7 +64,7 @@ services:
       start_period: 5s
     restart: unless-stopped
   worker:
-    image: campus-repair-api:latest
+    image: ${BACKEND_IMAGE:-campus-repair-api:latest}
     build: ./backend
     command: ["/app/worker"]
     environment: *backend-env
@@ -71,7 +72,7 @@ services:
       api: {condition: service_healthy}
     restart: unless-stopped
   mcp:
-    image: campus-repair-api:latest
+    image: ${BACKEND_IMAGE:-campus-repair-api:latest}
     build: ./backend
     command: ["/app/mcp"]
     environment: *backend-env
@@ -79,11 +80,11 @@ services:
       api: {condition: service_healthy}
     restart: unless-stopped
   web:
-    image: campus-repair-web:latest
+    image: ${WEB_IMAGE:-campus-repair-web:latest}
     build:
       context: .
       dockerfile: deploy/web.Dockerfile
-    ports: ["127.0.0.1:${WEB_PORT:-18083}:80"]
+    ports: ["127.0.0.1:${WEB_PORT:-18087}:80"]
     depends_on:
       api: {condition: service_healthy}
     restart: unless-stopped

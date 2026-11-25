@@ -97,6 +97,8 @@ class Review:
                 raise RuntimeError('Review dataset has not been prepared')
             self.create_environment()
         self.state = json.loads(self.state_path.read_text())
+        if self.state.get('primary_local_environment'):
+            raise RuntimeError('18087 is now the primary local environment. Use docker compose from the repository root; existing review data is retained.')
         if self.state.get('project') != PROJECT or self.state.get('version') != 1 or not self.config_path.exists():
             raise RuntimeError('Unknown/missing local fixture state; refusing replacement')
         self.config = json.loads(self.config_path.read_text())
@@ -329,7 +331,7 @@ class Review:
 
     def materials(self):
         definitions = [
-            ('M1', 'admin', '【虚构验收】报修信息与上门说明', '这份材料仅供软件验收，不是校方制度。报修应提供具体楼栋、房间或公共区域位置、照明/电器/给排水类别和故障现象。方便上门时间在建单后补充，偏好不是预约，维修人员接单后人工确认。没有无人进入授权，不承诺短信通知。'),
+            ('M1', 'admin', '【虚构验收】报修信息与上门说明', '这份材料仅供软件验收，不是校方制度。报修应提供具体楼栋、房间或公共区域位置、当前表单中的故障类别和故障现象。方便上门时间在建单后补充，偏好不是预约，维修人员接单后人工确认。没有无人进入授权，不承诺短信通知。'),
             ('M2', 'admin', '【虚构验收】安全提醒', '仅供虚构软件验收。发现灯具冒烟、设备异味或漏水接近电器时，停止使用并联系现场工作人员，在确保自身安全的前提下远离故障区域；不要自行拆卸、接线或带电维修。本材料没有规定维修完成时限。'),
             ('M3', 'admin', '【虚构验收】管理员协调说明', '仅供管理员验收，演示识别词为蓝杉十七。待审核、待派单属于管理员待办。维修人员负载为待接单加处理中。白跑次数按到场后无人记录统计，不等于白跑下降比例。'),
             ('M4', 'other_admin', '【虚构验收】隔离组织专用材料', '本材料仅属于隔离测试组织，演示识别词为银杏九号。其他组织的查询和引用不应包含本段内容。不是校方制度。'),

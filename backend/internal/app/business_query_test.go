@@ -7,6 +7,30 @@ import (
 	"time"
 )
 
+func TestRequesterCountQuery(t *testing.T) {
+	tests := []struct{ question, queue string }{
+		{"我的报修还有多少单未结束", "active"},
+		{"我的报修还有多少单待我处理", "action"},
+		{"我的报修还有几单待我处理", "action"},
+		{"那还有多少单未结束", ""},
+		{"我的报修今天还有多少单未结束", ""},
+		{"我的照明报修还有多少单未结束", ""},
+		{"我的报修还有多少单未结束，具体是哪几单", ""},
+		{"我的报修本周新增比上周多吗", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.question, func(t *testing.T) {
+			want := OrderQuery{}
+			if tt.queue != "" {
+				want = OrderQuery{Queue: tt.queue, Period: "all"}
+			}
+			if got := requesterCountQuery(tt.question); got != want {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestBusinessScenarioRouting(t *testing.T) {
 	for _, tt := range []struct {
 		role, text, queue, status, category, period string
@@ -78,6 +102,20 @@ func TestBusinessDateAndScope(t *testing.T) {
 	}
 }
 
+func TestVisitDateBasisUsesCurrentTechnicianAndBeijingDay(t *testing.T) {
+	now := time.Date(2026, 11, 19, 16, 0, 0, 0, time.UTC)
+	query := OrderQuery{Period: "today", DateBasis: "visit"}
+	where, args, basis, err := businessQuerySQL(User{Role: "technician", OrgID: 3, ID: 9}, query, now)
+	if err != nil || !strings.Contains(where, "assignee_id=?") || !strings.Contains(where, "active_visit_id") || args[0] != int64(3) || args[1] != int64(9) || args[len(args)-2] != now || args[len(args)-1] != now.Add(24*time.Hour) || !strings.Contains(basis, "预约") {
+		t.Fatal(where, args, basis, err)
+	}
+	for _, role := range []string{"admin", "requester"} {
+		if _, _, _, err := businessQuerySQL(User{Role: role}, query, now); err == nil {
+			t.Fatal("unexpected appointment scope", role)
+		}
+	}
+}
+
 func TestQueryIsNotAWriteRequest(t *testing.T) {
 	if businessWriteRequest("今天派给我的有哪些活") {
 		t.Fatal("read-only assignment question blocked")
@@ -88,7 +126,7 @@ func TestQueryIsNotAWriteRequest(t *testing.T) {
 }
 
 func TestUnsupportedFiltersAreExplicit(t *testing.T) {
-	for _, q := range []string{"上周有多少报修", "照明和电器有多少工单"} {
+	for _, q := range []string{"前天有多少报修", "照明和电器有多少工单", "空调和校园网有哪些工单"} {
 		if queryClarification("admin", q, false) == "" {
 			t.Fatal("unsupported scope silently treated as all", q)
 		}

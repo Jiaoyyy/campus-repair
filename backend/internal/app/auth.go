@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"golang.org/x/crypto/bcrypt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -101,7 +102,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	valid := bcrypt.CompareHashAndPassword([]byte(hash), []byte(input.Password)) == nil
 	if err == sql.ErrNoRows || !valid || !enabled {
 		s.limit.failed(key)
-		_ = writeAudit(r.Context(), s.DB, requestID(r), nil, "login", nil, "denied", map[string]any{})
+		if err := writeAudit(r.Context(), s.DB, requestID(r), nil, "login", nil, "denied", map[string]any{}); err != nil {
+			log.Printf("request=%s outcome=audit_unavailable", requestID(r))
+		}
 		s.fail(w, r, &Problem{401, "unauthorized", "账号或密码错误"})
 		return
 	}

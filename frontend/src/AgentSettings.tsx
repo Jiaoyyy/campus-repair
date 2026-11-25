@@ -1,17 +1,19 @@
 import { Select } from './Select';
+import { SkillSettings } from './SkillSettings';
 import { useEffect, useState } from 'react';
 import { api, roleNames } from './api';
-import type { Agent } from './assistant-api';
+import type { Agent, SkillConfig } from './assistant-api';
 import { Drawer, Empty, Icon, Loading, PageHeading } from './ui';
 
 type Material = { id: number; title: string; demo: boolean; generation: number };
 type MCPTool = { name: string; role: string; description: string };
-const toolTitles: Record<string, string> = { get_my_work_orders: '查询本人工单', get_assigned_work_orders: '查询分配给我的任务', list_dispatch_candidates: '查询可派维修人员', query_work_orders: '查询工单与分析问题' };
-function fingerprint(a?: Agent | null) { return a ? JSON.stringify([a.name, a.role, a.prompt || '', a.enabled, [...a.material_ids].sort((x,y) => x-y), [...(a.tool_names || [])].sort()]) : ''; }
-function clone(a: Agent): Agent { return { ...a, material_ids: [...a.material_ids], tool_names: [...(a.tool_names || [])] }; }
+const toolTitles: Record<string, string> = { get_my_work_orders: '查询本人工单', get_assigned_work_orders: '查询分配给我的任务', list_dispatch_candidates: '查询可派维修人员', query_work_orders: '查询工单与分析问题', get_work_order_detail: '查询工单详情与历史', get_work_order_visit: '查询上门安排', search_repair_knowledge: '检索授权知识材料' };
+function fingerprint(a?: Agent | null) { return a ? JSON.stringify([a.name, a.role, a.prompt || '', a.enabled, [...a.material_ids].sort((x,y) => x-y), [...(a.tool_names || [])].sort(), [...(a.skill_bindings || [])].sort((x,y) => x.skill_id.localeCompare(y.skill_id))]) : ''; }
+function clone(a: Agent): Agent { return { ...a, material_ids: [...a.material_ids], tool_names: [...(a.tool_names || [])], skill_bindings: (a.skill_bindings || []).map(binding => ({...binding})) }; }
 
 export function AgentSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
  const [agents, setAgents] = useState<Agent[]>([]), [materials, setMaterials] = useState<Material[]>([]), [tools, setTools] = useState<MCPTool[]>([]);
+ const [skills, setSkills] = useState<SkillConfig[]>([]);
  const [toolError, setToolError] = useState(''), [editing, setEditing] = useState<Agent | null>(null);
  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
  const [query, setQuery] = useState(''), [pending, setPending] = useState<Agent | 'refresh' | null>(null);
@@ -23,6 +25,8 @@ export function AgentSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolea
   setLoading(true); setError(''); setNotice('');
   try {
    const a = await api<{ items: Agent[] }>('/api/agents?manage=1');
+   const catalog = await api<{items: SkillConfig[]}>('/api/skills');
+   setSkills(catalog.items);
    const all: Material[] = []; let page = 1, total = 0;
    do { const v = await api<{ items: Material[]; total: number }>(`/api/materials?page_size=100&page=${page++}`); all.push(...v.items); total = v.total; } while (all.length < total);
    setAgents(a.items); setMaterials(all); setEditing(a.items[0] ? clone(a.items[0]) : null); setQuery('');
@@ -40,12 +44,22 @@ export function AgentSettings({ onDirtyChange }: { onDirtyChange: (dirty: boolea
   try { const v = await api<{ agent: Agent }>(`/api/agents/${editing.id}`, { method: 'PUT', body: JSON.stringify(editing) }); setAgents(items => items.map(a => a.id === v.agent.id ? v.agent : a)); setEditing(clone(v.agent)); setNotice('配置已保存，下次提问按新配置执行。'); }
   catch (e) { setError((e as Error).message); } finally { setBusy(false); }
  }
+ async function toggleSkill(skill: SkillConfig) {
+  setBusy(true); setError(''); setNotice('');
+  try {
+   const result = await api<{skill: SkillConfig}>(`/api/skills/${skill.id}`, {method: 'PUT', body: JSON.stringify({enabled: !skill.enabled, version: skill.version})});
+   setSkills(items => items.map(item => item.id === skill.id ? result.skill : item));
+   setNotice(`${skill.name}已在本组织${result.skill.enabled ? '启用' : '停用'}。`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
  const available = tools.filter(t => t.role === editing?.role || t.role === 'all'), filtered = materials.filter(m => m.title.toLowerCase().includes(query.toLowerCase().trim()));
  return <><PageHeading title="助手设置" ><button disabled={busy || loading} onClick={() => change('refresh')}><Icon kind="refresh"/>刷新配置</button></PageHeading>
  {error && <div className="error" role="alert">{error}</div>}{notice && <div className="success" role="status"><Icon kind="check"/>{notice}</div>}
  {loading ? <Loading text="正在读取助手配置…"/> : <div className="agent-settings"><aside className="panel agent-options"><h2>角色助手</h2>{agents.map(a => <button key={a.id} disabled={busy} aria-pressed={editing?.id === a.id} className={`agent-option ${editing?.id === a.id ? 'selected' : ''}`} onClick={() => { if (a.id !== editing?.id) change(a); }}><span className="agent-option-top"><strong>{a.name}</strong><span className={`status-dot ${a.enabled ? 'enabled' : ''}`}/></span><span>{roleNames[a.role as keyof typeof roleNames]} · {a.enabled ? '已启用' : '已停用'}</span><small>{a.material_ids.length} 份材料 · {(a.tool_names || []).length} 项查询</small></button>)}</aside>
  {editing ? <section className="panel agent-form"><form onSubmit={save}><fieldset disabled={busy}>
-  <section className="settings-section"><div className="section-heading"><div><h2>基本信息</h2></div><label className="switch-label"><input type="checkbox" checked={editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })}/><span>{editing.enabled ? '已启用' : '已停用'}</span></label></div><div className="form-grid"><label>助手名称<input required maxLength={100} value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })}/></label><label>适用角色<Select aria-label="适用角色" value={editing.role} onChange={e => setEditing({ ...editing, role: e.target.value, tool_names: [] })}>{Object.entries(roleNames).map(([k, name]) => <option value={k} key={k}>{name}</option>)}</Select></label></div><label>角色提示词<textarea required rows={4} maxLength={4000} value={editing.prompt || ''} onChange={e => setEditing({ ...editing, prompt: e.target.value })}/></label></section>
+  <section className="settings-section"><div className="section-heading"><div><h2>基本信息</h2></div><label className="switch-label"><input type="checkbox" checked={editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })}/><span>{editing.enabled ? '已启用' : '已停用'}</span></label></div><div className="form-grid"><label>助手名称<input required maxLength={100} value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })}/></label><label>适用角色<Select aria-label="适用角色" value={editing.role} onChange={e => setEditing({ ...editing, role: e.target.value, tool_names: [], skill_bindings: [] })}>{Object.entries(roleNames).map(([k, name]) => <option value={k} key={k}>{name}</option>)}</Select></label></div><label>角色提示词<textarea required rows={4} maxLength={4000} value={editing.prompt || ''} onChange={e => setEditing({ ...editing, prompt: e.target.value })}/><small>用于普通问答、业务解释和分析建议的表达。查询计划及报修字段提取遵循固定协议，角色与数据权限由服务端校验。</small></label></section>
+  <SkillSettings agent={editing} skills={skills} toolTitles={toolTitles} onBindingsChange={skill_bindings => setEditing({...editing, skill_bindings})} onToggle={skill => void toggleSkill(skill)}/>
   <section className="settings-section"><div className="section-heading"><div><h2>绑定材料 <span className="count">已选 {editing.material_ids.length}</span></h2></div></div><label className="search-field"><span className="sr-only">搜索绑定材料</span><Icon kind="search"/><input aria-label="搜索绑定材料" value={query} onChange={e => setQuery(e.target.value)} placeholder="按材料名称搜索"/></label><div className="material-choices">{filtered.length ? filtered.map(m => <label key={m.id} className="material-choice"><input type="checkbox" checked={editing.material_ids.includes(m.id)} onChange={e => setEditing({ ...editing, material_ids: e.target.checked ? [...editing.material_ids, m.id] : editing.material_ids.filter(id => id !== m.id) })}/><span><strong>{m.title}</strong><small>{m.demo ? '演示材料 · ' : ''}{m.generation ? '可用于检索' : '等待索引'}</small></span></label>) : <p className="choice-empty">{materials.length ? '没有匹配的材料，试试其他名称。' : '还没有材料，请先到知识库上传。'}</p>}</div></section>
   <section className="settings-section"><div className="section-heading"><div><h2>实时查询工具 <span className="count">已选 {(editing.tool_names || []).length}</span></h2></div></div>{toolError && <div className="assistant-notice" role="status">{toolError}</div>}<div className="tool-choices">{available.map(tool => <label key={tool.name} className="material-choice"><input type="checkbox" checked={(editing.tool_names || []).includes(tool.name)} onChange={e => setEditing({ ...editing, tool_names: e.target.checked ? [...(editing.tool_names || []), tool.name] : (editing.tool_names || []).filter(name => name !== tool.name) })}/><span><strong>{toolTitles[tool.name] || tool.name}</strong><small>{tool.description}</small></span></label>)}</div><details className="technical-details"><summary>查看 MCP 技术信息</summary><p>{available.length ? available.map(t => t.name).join('、') : '暂无可用工具'}。工具通过内部 MCP 服务发现并二次校验权限。</p></details></section>
   <div className="settings-savebar">{error && <p className="savebar-error" role="status">{error}</p>}<span role="status">{dirty ? <><span className="unsaved-dot"/>有未保存的更改</> : '配置已同步'}</span><div><button type="button" disabled={!dirty || busy} onClick={() => change(agents.find(a => a.id === editing.id)!)}>撤销更改</button><button className="primary" disabled={!dirty || busy}>{busy ? '正在保存…' : '保存配置'}</button></div></div>

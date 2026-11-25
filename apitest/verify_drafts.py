@@ -57,7 +57,7 @@ def save(d,token=None,**changes):return req('PUT',path(d),token or user,{**field
 def submit(d,token=None,**changes):return req('POST','/api/work-orders',token or user,{**fields(d),'draft_message_id':d['message_id'],'draft_version':d['version'],**changes},d['idempotency_key'])
 def counts():return sql("SELECT CONCAT((SELECT COUNT(*) FROM work_orders),':',(SELECT COUNT(*) FROM work_order_events),':',(SELECT COUNT(*) FROM audit_events WHERE action='work_order.create'))")
 def complete():
- cid=create();d=turn(cid,'三号楼201宿舍灯坏了，帮我报修')['draft'];check(d['location']=='三号楼201' and d['description']=='宿舍灯坏了','complete structured draft');return d
+ cid=create();d=turn(cid,'三号楼201宿舍灯坏了，帮我报修')['draft'];check(d['location']=='三号楼201' and d['description']=='灯坏了','complete structured draft');return d
 mode('ok')
 for _ in range(100):
  try:
@@ -68,10 +68,10 @@ else:raise RuntimeError('API unavailable')
 admin=login('admin','SEED_ADMIN_PASSWORD');user=login('requester','SEED_REQUESTER_PASSWORD');second=login('requester2','SEED_REQUESTER2_PASSWORD');other=login('other','SEED_OTHER_PASSWORD');tech=login('tech','SEED_TECH_PASSWORD')
 agents=expect(200,req('GET','/api/agents',user),'agents')['items'];aid=agents[0]['id']
 cid=create();before=counts();d=turn(cid,'宿舍灯坏了，帮我报修')['draft']
-check(d['category']=='lighting' and not d['location'] and d['description']=='宿舍灯坏了','missing location remains empty')
+check(d['category']=='lighting' and not d['location'] and d['description']=='灯坏了','missing location remains empty')
 check(before==counts(),'unconfirmed draft no business write')
 expect(400,submit(d),'missing required field rejected')
-d2=turn(cid,'三号楼201')['draft'];check(d2['location']=='三号楼201' and d2['description']=='宿舍灯坏了','multi-turn context')
+d2=turn(cid,'三号楼201')['draft'];check(d2['location']=='三号楼201' and d2['description']=='灯坏了','multi-turn context')
 check('draft' not in turn(cid,'谢谢'),'small talk does not replace draft')
 check('draft' not in turn(cid,'讲个校园笑话'),'topic switch with unchanged fields does not publish a replacement')
 check(expect(200,req('GET',path(d2),user),'prior card after topic switch')['draft']['status']=='active','topic switch preserves editable draft')

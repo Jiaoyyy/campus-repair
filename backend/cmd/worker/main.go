@@ -12,11 +12,11 @@ import (
 )
 
 func main() {
-	c, err := app.LoadConfig()
+	dsn, err := app.LoadDatabaseDSN()
 	if err != nil {
 		log.Fatal(err)
 	}
-	db, err := sql.Open("mysql", c.DSN)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Fatal("database configuration invalid")
 	}

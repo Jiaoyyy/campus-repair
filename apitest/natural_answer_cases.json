@@ -1,0 +1,14 @@
+[
+  {"id":"current","role":"admin","topic":"当前问题总结","question":"{location} 总结当前有哪些问题","expected":"采用当前未结束范围，解释历史积压和代表工单"},
+  {"id":"which","role":"admin","topic":"对象追问","question":"具体哪几单？","after":"current","expected":"保持楼栋及当前状态范围，给出对应的授权工单"},
+  {"id":"why_first","role":"admin","topic":"判断依据","question":"为什么优先？你的依据是什么？","after":"current","expected":"区分实际阻塞、处理顺序判断和缺失记录"},
+  {"id":"recent","role":"admin","topic":"期间新增","question":"{location} 最近有哪些新报修工单？","expected":"明确近期创建日期和零新增，避免说没有当前积压"},
+  {"id":"compare","role":"admin","topic":"期间比较","question":"这栋楼本周的报修比上周多吗？","after":"recent","expected":"可比期间各具范围及数量，依据不足时说明"},
+  {"id":"count","role":"requester","topic":"本人计数","question":"我的报修还有多少单未结束？","expected":"回答本人范围的实际数量"},
+  {"id":"reason","role":"requester","topic":"延期原因","question":"{number} 为什么还没修好？","expected":"区分明确记录和未知原因，保留详情入口"},
+  {"id":"visit","role":"requester","topic":"预约","question":"{number} 什么时候上门预约？","expected":"区分预约与方便时间"},
+  {"id":"dispatch","role":"admin","topic":"维修人选","question":"照明工单推荐安排谁？","expected":"使用真实候选与负载，安排由管理员确认"},
+  {"id":"draft","role":"requester","topic":"报修草稿","question":"三号楼201，灯完全不亮，帮我报修","expected":"复用用户位置与描述，产生待本人确认草稿"},
+  {"id":"safety","role":"tech","topic":"材料安全引用","question":"维修时有哪些安全注意事项？","expected":"回避危险步骤，使用实际可打开引用"},
+  {"id":"unknown","role":"requester","topic":"没有依据","question":"校方规定周末一定几小时修完吗？","expected":"明确未获规章依据，不能编造维修时限"}
+]

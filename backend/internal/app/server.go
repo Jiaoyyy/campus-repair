@@ -8,6 +8,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,7 +60,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		if v, ok := r.Context().Value(userKey{}).(User); ok {
 			u = &v
 		}
-		if e := writeAudit(r.Context(), s.DB, requestID(r), u, "access.denied", nil, "denied", map[string]any{"path": r.URL.Path, "code": p.Code}); e != nil {
+		if e := writeAudit(r.Context(), s.DB, requestID(r), u, "access.denied", nil, "denied", map[string]any{"route": r.Pattern, "code": p.Code}); e != nil {
 			log.Printf("request=%s outcome=audit_unavailable", requestID(r))
 		}
 	}
@@ -81,10 +82,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/logout", s.protect(s.logout))
 	m.HandleFunc("GET /api/me", s.protect(func(w http.ResponseWriter, r *http.Request) { send(w, 200, map[string]any{"user": current(r)}) }))
 	m.HandleFunc("GET /api/agents", s.protect(s.agents))
+	m.HandleFunc("GET /api/skills", s.protect(s.skills))
+	m.HandleFunc("PUT /api/skills/{skill}", s.protect(s.updateSkill))
 	m.HandleFunc("GET /api/mcp/tools", s.protect(s.mcpDiscover))
 	m.HandleFunc("PUT /api/agents/{id}", s.protect(s.updateAgent))
 	m.HandleFunc("GET /api/conversations", s.protect(s.conversations))
 	m.HandleFunc("POST /api/conversations", s.protect(s.createConversation))
+	m.HandleFunc("GET /api/conversations/{id}/messages/{message}/orders", s.protect(s.messageOrderPage))
 	m.HandleFunc("GET /api/conversations/{id}/messages", s.protect(s.messages))
 	m.HandleFunc("POST /api/conversations/{id}/messages", s.protect(s.messageStream))
 	m.HandleFunc("GET /api/conversations/{id}/drafts/{message}", s.protect(s.getDraft))
@@ -103,8 +107,11 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PUT /api/work-orders/{id}/visit/availability", s.protect(s.visitWrite))
 	m.HandleFunc("POST /api/work-orders/{id}/visit/actions/{action}", s.protect(s.visitWrite))
 	m.HandleFunc("GET /api/work-orders/summary", s.protect(s.summary))
+	m.HandleFunc("GET /api/work-orders/stats", s.protect(s.workOrderStats))
 	m.HandleFunc("GET /api/work-orders", s.protect(s.list))
 	m.HandleFunc("POST /api/work-orders", s.protect(s.createHTTP))
+	m.HandleFunc("GET /api/work-orders/{id}/media", s.protect(s.listOrderMedia))
+	m.HandleFunc("GET /api/work-orders/{id}/media/{media}", s.protect(s.orderMediaFile))
 	m.HandleFunc("GET /api/work-orders/{id}", s.protect(s.detail))
 	m.HandleFunc("POST /api/work-orders/{id}/{action}", s.protect(s.actionHTTP))
 	m.HandleFunc("GET /api/technicians", s.protect(s.technicians))
@@ -118,6 +125,12 @@ func (s *Server) Handler() http.Handler {
 		timeout := 10 * time.Second
 		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/conversations/") && strings.HasSuffix(r.URL.Path, "/messages") {
 			timeout = 125 * time.Second
+		}
+		if r.Method == "POST" && r.URL.Path == "/api/work-orders" && multipartOrder(r) {
+			timeout = 120 * time.Second
+			controller := http.NewResponseController(w)
+			_ = controller.SetReadDeadline(time.Now().Add(80 * time.Second))
+			_ = controller.SetWriteDeadline(time.Now().Add(125 * time.Second))
 		}
 		ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), requestKey{}, id), timeout)
 		defer cancel()
@@ -148,6 +161,11 @@ func pagination(r *http.Request) (int, int, error) {
 	}
 	return page, size, nil
 }
+func multipartOrder(r *http.Request) bool {
+	kind, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return kind == "multipart/form-data"
+}
+
 func (s *Server) createHTTP(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
 	if u.Role != "requester" {
@@ -158,11 +176,25 @@ func (s *Server) createHTTP(w http.ResponseWriter, r *http.Request) {
 		Input
 		draftConfirmation
 	}
-	if err := decode(w, r, &input); err != nil {
+	var media []repairMedia
+	var err error
+	if multipartOrder(r) {
+		select {
+		case mediaSlots <- struct{}{}:
+			defer func() { <-mediaSlots }()
+		default:
+			s.fail(w, r, &Problem{429, "media_busy", "附件正在排队处理，请稍后重试"})
+			return
+		}
+		input.Input, media, err = readOrderMedia(w, r, &input.draftConfirmation)
+	} else {
+		err = decode(w, r, &input)
+	}
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	o, replay, err := s.createWithDraft(r.Context(), u, input.Input, r.Header.Get("Idempotency-Key"), requestID(r), input.draftConfirmation)
+	o, replay, err := s.createWithDraft(r.Context(), u, input.Input, r.Header.Get("Idempotency-Key"), requestID(r), input.draftConfirmation, media)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -215,8 +247,8 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 	}
 	if v := query.Get("location"); v != "" {
-		q += " AND location LIKE ?"
-		args = append(args, "%"+v+"%")
+		q += " AND LOCATE(?,location)>0"
+		args = append(args, v)
 	}
 	page, size, err := pagination(r)
 	if err != nil {
@@ -311,7 +343,33 @@ func (s *Server) detail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	send(w, 200, map[string]any{"order": o, "events": events, "records": records})
+	data := map[string]any{"order": o, "events": events, "records": records}
+	for _, link := range []struct{ key, match, target string }{
+		{"recurrence_source", "work_order_id", "source_order_id"},
+		{"recurrence_followup", "source_order_id", "work_order_id"},
+	} {
+		var relatedID int64
+		err = s.DB.QueryRowContext(r.Context(), "SELECT "+link.target+" FROM work_order_recurrences WHERE "+link.match+"=? ORDER BY work_order_id DESC LIMIT 1", id).Scan(&relatedID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		related, e := s.getOrder(r.Context(), current(r), relatedID)
+		if e == nil {
+			data[link.key] = map[string]any{"id": related.ID, "number": related.Number}
+		}
+		if e != nil {
+			var problem *Problem
+			if !errors.As(e, &problem) || problem.Status != 404 {
+				s.fail(w, r, e)
+				return
+			}
+		}
+	}
+	send(w, 200, data)
 }
 func (s *Server) technicians(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
@@ -324,26 +382,14 @@ func (s *Server) technicians(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, bad("类别无效"))
 		return
 	}
-	rows, err := s.DB.QueryContext(r.Context(), "SELECT u.id,u.display_name,COUNT(w.id) FROM users u JOIN technician_categories c ON c.user_id=u.id AND c.category=? LEFT JOIN work_orders w ON w.assignee_id=u.id AND w.org_id=u.org_id AND w.status IN ('assigned','in_progress') WHERE u.org_id=? AND u.enabled=TRUE AND u.role='technician' GROUP BY u.id,u.display_name ORDER BY COUNT(w.id),u.id", cat, u.OrgID)
+	people, err := dispatchCandidates(r.Context(), s.DB, u, cat)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id int64
-		var name string
-		var count int
-		if err = rows.Scan(&id, &name, &count); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		items = append(items, map[string]any{"id": id, "display_name": name, "category": cat, "pending_count": count})
-	}
-	if err = rows.Err(); err != nil {
-		s.fail(w, r, err)
-		return
+	items := make([]map[string]any, 0, len(people))
+	for _, person := range people {
+		items = append(items, map[string]any{"id": person.ID, "display_name": person.Name, "category": cat, "pending_count": person.Pending + person.Progress, "assigned_count": person.Pending, "in_progress_count": person.Progress})
 	}
 	send(w, 200, map[string]any{"items": items})
 }
@@ -358,18 +404,17 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	q := "a.org_id=?"
-	args := []any{u.OrgID}
-	if v := r.URL.Query().Get("resource_id"); v != "" {
-		q += " AND a.resource_id=?"
-		args = append(args, v)
+	q, args, err := auditFilters(u.OrgID, r.URL.Query())
+	if err != nil {
+		s.fail(w, r, err)
+		return
 	}
 	var count int
 	if err = s.DB.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM audit_events a WHERE "+q, args...).Scan(&count); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	rows, err := s.DB.QueryContext(r.Context(), "SELECT a.id,a.request_id,a.actor_id,a.action,a.resource_id,a.outcome,a.metadata,a.created_at,COALESCE(u.display_name,''),COALESCE(o.number,'') FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id AND u.org_id=a.org_id LEFT JOIN work_orders o ON o.id=a.resource_id AND o.org_id=a.org_id AND a.action LIKE 'work_order.%' WHERE "+q+" ORDER BY a.id DESC LIMIT ? OFFSET ?", append(args, size, (page-1)*size)...)
+	rows, err := s.DB.QueryContext(r.Context(), "SELECT a.id,a.request_id,a.actor_id,a.action,a.resource_id,a.outcome,JSON_REMOVE(a.metadata,'$.query.location','$.query.keyword','$.query.number','$.query.metric_cursor'),a.created_at,COALESCE(u.display_name,''),COALESCE(o.number,'') FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id AND u.org_id=a.org_id LEFT JOIN work_orders o ON o.id=a.resource_id AND o.org_id=a.org_id AND a.action LIKE 'work_order.%' WHERE "+q+" ORDER BY a.id DESC LIMIT ? OFFSET ?", append(args, size, (page-1)*size)...)
 	if err != nil {
 		s.fail(w, r, err)
 		return

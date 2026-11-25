@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -27,7 +28,8 @@ func (s *Server) connectMCP(ctx context.Context, sessionHash string, agentID int
 	if url == "" || len(secret) < 32 {
 		return nil, "", errors.New("MCP is not configured")
 	}
-	credential := SignMCPCall(secret, sessionHash, agentID, reqID)
+	skill, _ := ctx.Value(skillContextKey{}).(*SkillRun)
+	credential := SignMCPCall(secret, sessionHash, agentID, reqID, skill)
 	client := mcp.NewClient(&mcp.Implementation{Name: "campus-repair-api", Version: "1.0.0"}, nil)
 	transport := &mcp.StreamableClientTransport{Endpoint: url, MaxRetries: -1, DisableStandaloneSSE: true, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: mcpBearerTransport{credential, http.DefaultTransport}}}
 	session, err := client.Connect(ctx, transport, nil)
@@ -102,8 +104,30 @@ func (s *Server) discoveredMCP(parent context.Context, r *http.Request) ([]*mcp.
 
 // callMCPTool is the Host-side entry point for a single assistant turn. The
 // server repeats every check; the Host check only prevents unnecessary calls.
-func (s *Server) callMCPTool(ctx context.Context, r *http.Request, agentID int64, name string, arguments any) (*mcp.CallToolResult, error) {
+func (s *Server) callMCPTool(ctx context.Context, r *http.Request, agentID int64, name string, arguments any) (result *mcp.CallToolResult, callErr error) {
+	started := time.Now()
+	defer recordStage(ctx, "MCP", started)
 	u := current(r)
+	defer func() {
+		if callErr == nil {
+			return
+		}
+		outcome, reason := "failed", "transport_or_protocol"
+		var p *Problem
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(callErr, context.DeadlineExceeded):
+			reason = "timeout"
+		case errors.Is(callErr, context.Canceled):
+			reason = "cancelled"
+		case errors.As(callErr, &p) && p.Status == http.StatusForbidden:
+			outcome, reason = "denied", "host_access"
+		}
+		auditCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer stop()
+		if err := writeAudit(auditCtx, s.DB, requestID(r), &u, "mcp.host", nil, outcome, map[string]any{"tool": name, "duration_ms": time.Since(started).Milliseconds(), "reason": reason}); err != nil {
+			log.Printf("request=%s outcome=audit_unavailable", requestID(r))
+		}
+	}()
 	if !mcpRoleAllowed(name, u.Role) {
 		return nil, denied()
 	}
@@ -112,6 +136,11 @@ func (s *Server) callMCPTool(ctx context.Context, r *http.Request, agentID int64
 		return nil, denied()
 	}
 	claim := mcpClaims{Session: s.tokenHash(h[1]), AgentID: agentID}
+	if skill, _ := ctx.Value(skillContextKey{}).(*SkillRun); skill != nil {
+		claim.Skill = skill.ID
+		claim.SkillVersion = skill.ConfigVersion
+		claim.DefinitionVersion = skill.DefinitionVersion
+	}
 	if err := mcpAllowed(ctx, s.DB, claim, u, name); err != nil {
 		return nil, denied()
 	}

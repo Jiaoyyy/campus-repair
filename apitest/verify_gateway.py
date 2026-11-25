@@ -119,7 +119,7 @@ class Verification:
                     kind, parts = '', []
         self.check(bool(events) and events[0][0] == 'meta' and events[-1][0] == 'done'
                    and sum(e[0] in ('done', 'error') for e in events) == 1,
-                   'SSE 完整结束：' + question)
+                   'SSE 完整结束：' + question + ' events=' + ','.join(kind for kind, _ in events) + ' errors=' + ','.join(str(data.get('code', 'unknown')) for kind, data in events if kind == 'error'))
         done = events[-1][1]
         self.check(bool(done['answer'].strip()) and any(e[0] == 'delta' for e in events), '收到非空流式正文')
         history = self.request('GET', f'/api/conversations/{cid}/messages', token)['items']
